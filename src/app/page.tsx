@@ -1,39 +1,202 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Home as HomeIcon, ClipboardList, Users, Calendar as CalendarIcon,
   ShoppingBag, MoreHorizontal, Moon, Sun, ArrowUpRight, Plus,
   ArrowLeft, Search, Bell, Check, X, Shield, Phone, MessageSquare,
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
-  LogOut, ChevronDown, Percent, CreditCard, Send,
+  LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet
 } from 'lucide-react';
+import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
+import { api } from '@/lib/api';
+
+// --- REAL API RESPONSE SHAPES (per verified backend contract) ---
+interface DashboardTodayOrder {
+  id: string;
+  bakerId: string;
+  orderNumber: string;
+  deliveryDate: string;
+  status: string;
+  totalPrice: number;
+  balanceDue: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface DashboardUpcomingOrder {
+  id: string;
+  orderNumber: string;
+  customerName: string;
+  cakeCategory: string;
+  deliveryDate: string;
+  deliveryTime: string | null;
+  status: string;
+  totalPrice: number;
+  balanceDue: number;
+}
+
+interface DashboardSummary {
+  todayDeliveries: number;
+  activeOrders: number;
+  outstandingBalance: number;
+  totalRevenue: number;
+  todayOrders: DashboardTodayOrder[];
+  // Optional: absent if the backend serving this response predates the
+  // Upcoming Lookahead feature (e.g. a stale dev server not yet restarted
+  // after this field was added) — guarded with ?. wherever it's read.
+  upcomingOrders?: {
+    month: string | null;
+    orders: DashboardUpcomingOrder[];
+  };
+}
+
+// Real order-list status vocabulary (Pending/Confirmed/In Progress/Ready/
+// Delivered/Cancelled) — distinct from the mock Order['status'] type still
+// used elsewhere until those screens are wired.
+type RealOrderStatus = 'Pending' | 'Confirmed' | 'In Progress' | 'Ready' | 'Delivered' | 'Cancelled';
+type RealOrderTab = 'All' | RealOrderStatus;
+
+interface RealOrderListItem {
+  orderId: string;
+  orderNumber: string;
+  customerName: string;
+  phone: string | null;
+  deliveryDate: string;
+  status: RealOrderStatus;
+  totalPrice: number;
+  balanceDue: number;
+}
+
+interface OrdersPagination {
+  page: number;
+  limit: number;
+  totalItems: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+}
+
+interface RealCustomerListItem {
+  customerId: string;
+  displayId: string;
+  name: string;
+  phone: string | null;
+  address: string | null;
+  totalOrders: number;
+  lifetimeValue: number;
+  outstandingBalance: number;
+  lastOrderDate: string | null;
+}
+
+interface RealCustomerProfileOrder {
+  orderId: string;
+  orderNumber: string;
+  deliveryDate: string;
+  status: string;
+  totalPrice: number;
+  balanceDue: number;
+  paymentStatus: string;
+}
+
+// Real investment categories (per confirmed backend contract) — distinct
+// from the mock Expense['category'] vocab ('Raw Material'/'Packaging'/
+// 'Decoration'/'Equipment'), which doesn't match.
+const REAL_INVESTMENT_CATEGORIES = ['ingredients', 'packaging', 'delivery', 'utilities', 'equipment'] as const;
+type RealInvestmentCategory = typeof REAL_INVESTMENT_CATEGORIES[number];
+
+interface RealInvestmentEntry {
+  id: string;
+  displayId: string;
+  category: string;
+  description: string | null;
+  materialName: string;
+  quantity: number;
+  unit: string;
+  pricePerUnit: number;
+  totalCost: number;
+  supplierName: string | null;
+  purchaseDate: string;
+}
+
+interface RealBakerProfile {
+  business: {
+    businessName: string | null;
+    ownerName: string | null;
+    phone: string;
+    email: string | null;
+    logoUrl: string | null;
+    accountVerified: boolean;
+  };
+  verification: {
+    fssaiNumber: string | null;
+    fssaiVerified: boolean;
+    fssaiDocumentUrl: string | null;
+  };
+  payment: {
+    upiId: string | null;
+    merchantName: string | null;
+    defaultCollectionMethod: string;
+    dynamicQrEnabled: boolean;
+    whatsappReceiptEnabled: boolean;
+    defaultAdvancePercentage: number | null;
+  };
+  subscription: {
+    plan: string | null;
+    status: string;
+    trialEndsOn: string | null;
+    trialDaysRemaining: number;
+    nextBillingDate: string | null;
+  };
+}
+
+interface RealCalendarDay {
+  date: string;
+  totalOrders: number;
+  pending: number;
+  confirmed: number;
+  inProgress: number;
+  ready: number;
+  delivered: number;
+  outstandingBalance: number;
+}
+
+interface RealCalendarData {
+  view: string;
+  startDate: string;
+  endDate: string;
+  days: RealCalendarDay[];
+}
+
+interface RealBillingStatus {
+  plan: string | null;
+  subscriptionStatus: string;
+  trialDaysRemaining: number;
+  trialEndDate: string | null;
+  nextBillingDate: string | null;
+  autoRenew: boolean;
+}
+
+interface RealCustomerProfile {
+  customerId: string;
+  displayId: string;
+  name: string;
+  phone: string | null;
+  address: string | null;
+  notes: string | null;
+  preferredDeliveryTime: string | null;
+  summary: {
+    totalOrders: number;
+    lifetimeValue: number;
+    outstandingBalance: number;
+    lastOrderDate: string | null;
+  };
+  orders: RealCustomerProfileOrder[];
+}
 
 // --- INTERFACES ---
-interface Order {
-  id: string;
-  cakeName: string;
-  customerName: string;
-  phone: string;
-  deliveryDate: string;
-  deliveryTime: string;
-  status: 'In Production' | 'Ready' | 'Delivered' | 'Cancelled';
-  advanceAmount: number;
-  totalAmount: number;
-  type: 'Pickup' | 'Delivery';
-}
-
-interface Customer {
-  name: string;
-  phone: string;
-  tag: 'Repeat VIP' | 'Repeat' | '';
-  ordersCount: number;
-  lastOrderDate: string;
-  ltv: number;
-}
-
 interface Expense {
   id: string;
   item: string;
@@ -41,20 +204,6 @@ interface Expense {
   date: string;
   category: 'Raw Material' | 'Packaging' | 'Decoration' | 'Equipment';
 }
-
-const initialOrders: Order[] = [
-  { id: 'K-1042', cakeName: '1.5kg Chocolate Truffle', customerName: 'Neha Sharma', phone: '+91 98765 43210', deliveryDate: '2023-10-24', deliveryTime: '4:00 PM', status: 'In Production', advanceAmount: 1000, totalAmount: 1500, type: 'Pickup' },
-  { id: 'K-1041', cakeName: '2kg Black Forest', customerName: 'Rohit Verma', phone: '+91 91234 56789', deliveryDate: '2023-10-24', deliveryTime: '6:30 PM', status: 'In Production', advanceAmount: 700, totalAmount: 1000, type: 'Pickup' },
-  { id: 'K-1039', cakeName: '1kg Red Velvet', customerName: 'Anjali Mehta', phone: '+91 99887 66554', deliveryDate: '2023-10-25', deliveryTime: '11:00 AM', status: 'In Production', advanceAmount: 500, totalAmount: 1000, type: 'Pickup' },
-  { id: 'K-1037', cakeName: '500g Butterscotch Bento', customerName: 'Priya Singh', phone: '+91 88900 11223', deliveryDate: '2023-10-25', deliveryTime: '3:00 PM', status: 'In Production', advanceAmount: 300, totalAmount: 600, type: 'Pickup' }
-];
-
-const initialCustomers: Customer[] = [
-  { name: 'Neha Sharma', phone: '+91 98765 43210', tag: 'Repeat VIP', ordersCount: 4, lastOrderDate: 'Oct 12, 2023', ltv: 4500 },
-  { name: 'Rahul Verma', phone: '+91 91234 56789', tag: 'Repeat', ordersCount: 3, lastOrderDate: 'Oct 08, 2023', ltv: 3200 },
-  { name: 'Anita Mehta', phone: '+91 99887 66554', tag: 'Repeat', ordersCount: 2, lastOrderDate: 'Oct 05, 2023', ltv: 2100 },
-  { name: 'Priya Singh', phone: '+91 88900 11223', tag: '', ordersCount: 1, lastOrderDate: 'Sep 28, 2023', ltv: 1200 }
-];
 
 const initialExpenses: Expense[] = [
   { id: 'E-1', item: '5kg Compound Chocolate', amount: 1200, date: 'Oct 24, 2023', category: 'Raw Material' },
@@ -77,12 +226,19 @@ export default function Webapp() {
   // --- BASE APP STATE ---
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [step, setStep] = useState<'login' | 'otp' | 'dashboard'>('login');
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
 
-  // Phone login fields
-  const [phoneNumber, setPhoneNumber] = useState('');
-  const [otpFields, setOtpFields] = useState(['', '', '', '']);
+  // Real dashboard data (GET /api/dashboard/summary)
+  const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+
+  // Email login fields
+  const [email, setEmail] = useState('');
+  const [otpFields, setOtpFields] = useState(['', '', '', '', '', '']);
   const [otpError, setOtpError] = useState('');
   const [otpTimer, setOtpTimer] = useState(29);
+  const [isVerifying, setIsVerifying] = useState(false);
 
   // Navigation tabs
   // Home, Orders, Customers, Calendar, Supply, Settings, Expenses
@@ -95,61 +251,538 @@ export default function Webapp() {
     'subscription-status' | 'help-support' | 'legal-policies'
   >('none');
 
-  // Business state
-  const [bakeryName, setBakeryName] = useState('The Sugar Studio');
-  const [ownerName, setOwnerName] = useState('Neha Sharma');
-  const [upiId, setUpiId] = useState('thesugarstudio@oksbi');
-  const [fssaiLicense, setFssaiLicense] = useState('21221008000123');
-  const [defaultAdvance, setDefaultAdvance] = useState('50%');
-  const [autoSendReceipts, setAutoSendReceipts] = useState(true);
-  const [isTrialEnding, setIsTrialEnding] = useState(true);
+  // Business state — bakeryName/ownerName/phoneNumber/upiId/fssaiLicense/
+  // defaultAdvance/autoSendReceipts mock state removed; all now sourced
+  // from real bakerProfile (GET /api/baker/profile) and upiForm.
   const [cartCount, setCartCount] = useState(3);
 
   // Database records
-  const [orders, setOrders] = useState<Order[]>(initialOrders);
-  const [customers, setCustomers] = useState<Customer[]>(initialCustomers);
   const [expenses, setExpenses] = useState<Expense[]>(initialExpenses);
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
 
-  // New Order Form state
-  const [newOrderForm, setNewOrderForm] = useState({
-    customerName: '',
-    phone: '',
-    cakeCategory: 'Chocolate Truffle',
-    weight: '1.5 kg',
-    date: '2023-10-24',
-    time: '4:00 PM',
-    type: 'Pickup' as 'Pickup' | 'Delivery',
-    totalAmount: '',
-    advanceAmount: ''
-  });
+  // Real single-order detail (GET /api/orders/:orderNumber) — shown inside
+  // the existing "customer-profile" sheet slot per explicit decision not to
+  // add a new screen. Distinct from the real per-customer profile+order-
+  // history data (wired next, for the Customers screen) since the two
+  // backend endpoints return genuinely different shapes.
+  const [selectedOrderDetail, setSelectedOrderDetail] = useState<any | null>(null);
+  const [orderDetailLoading, setOrderDetailLoading] = useState(false);
+  const [orderDetailError, setOrderDetailError] = useState<string | null>(null);
+
+  const openCustomerProfile = useCallback((customerId: string) => {
+    setSelectedOrderDetail(null);
+    setSelectedCustomerProfile(null);
+    setCustomerProfileError(null);
+    setActiveSheet('customer-profile');
+    setCustomerProfileLoading(true);
+    api
+      .get<{ success: boolean; data: RealCustomerProfile }>(`/api/customers/${customerId}`)
+      .then((res) => setSelectedCustomerProfile(res.data))
+      .catch((err: any) => setCustomerProfileError(err.message || 'Failed to load customer profile.'))
+      .finally(() => setCustomerProfileLoading(false));
+  }, []);
+
+  const openOrderDetail = useCallback((orderNumber: string) => {
+    setSelectedOrderDetail(null);
+    setSelectedCustomerProfile(null);
+    setOrderDetailError(null);
+    setActiveSheet('customer-profile');
+    setOrderDetailLoading(true);
+    api
+      .get<{ success: boolean; data: any }>(`/api/orders/${orderNumber}`)
+      .then((res) => setSelectedOrderDetail(res.data))
+      .catch((err: any) => setOrderDetailError(err.message || 'Failed to load order details.'))
+      .finally(() => setOrderDetailLoading(false));
+  }, []);
+
+  // New Order Form state — real POST /api/orders payload shape:
+  // customer{name,phone,address}, cake{category,flavour,weightInPounds,
+  // quantity}, occasion, delivery{type,date,time,charge},
+  // payment{totalPrice,advancePaid,paymentMethod,forceConfirm}. Weight is
+  // always in pounds (weightInPounds on the backend) — a lb preset or a
+  // free custom numeric entry, never kg/g.
+  const WEIGHT_PRESETS_LB = ['0.5', '1', '2', '3'] as const;
+  const CAKE_CATEGORIES = [
+    'Chocolate Truffle', 'Red Velvet', 'Butterscotch', 'Black Forest', 'Pineapple', 'Vanilla',
+    'Fresh Fruit', 'Rainbow', 'Photo Cake', 'Cheesecake', 'Fondant', 'Designer',
+  ];
+  const CAKE_FLAVOURS = [
+    'Chocolate', 'Vanilla', 'Butterscotch', 'Red Velvet', 'Pineapple', 'Mango', 'Strawberry',
+    'Coffee', 'Black Forest', 'Nutella', 'Blueberry', 'Caramel',
+  ];
+  const PAYMENT_METHODS = ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER'] as const;
+
+  function getDefaultNewOrderForm() {
+    return {
+      customerName: '',
+      phone: '',
+      address: '',
+      cakeCategory: 'Chocolate Truffle',
+      flavour: 'Chocolate',
+      weightPreset: '1' as (typeof WEIGHT_PRESETS_LB)[number] | 'custom',
+      weightCustom: '',
+      quantity: '',
+      occasion: '',
+      deliveryType: 'Pickup' as 'Pickup' | 'Delivery',
+      date: new Date().toISOString().slice(0, 10),
+      time: '',
+      deliveryCharge: '',
+      totalAmount: '',
+      advanceAmount: '',
+      paymentMethod: 'CASH' as (typeof PAYMENT_METHODS)[number],
+    };
+  }
+
+  const [newOrderForm, setNewOrderForm] = useState(getDefaultNewOrderForm());
+  const [newOrderSubmitting, setNewOrderSubmitting] = useState(false);
+  const [newOrderError, setNewOrderError] = useState<string | null>(null);
+  // Tracks whether the baker has manually typed an advance amount, so the
+  // defaultAdvancePercentage-based suggestion (below) only pre-fills the
+  // field and never clobbers a value the baker deliberately entered.
+  const [newOrderAdvanceTouched, setNewOrderAdvanceTouched] = useState(false);
 
   // Expense form state
+  // Real investment/expense-ledger form fields — shape genuinely differs
+  // from the mock (quantity x pricePerUnit -> server-computed totalCost,
+  // not a flat "amount"; real category vocab; purchaseDate is required by
+  // the API and wasn't in the mock form at all).
   const [expenseForm, setExpenseForm] = useState({
-    item: '',
-    amount: '',
-    category: 'Raw Material' as Expense['category']
+    materialName: '',
+    category: 'ingredients' as RealInvestmentCategory,
+    quantity: '',
+    unit: '',
+    pricePerUnit: '',
+    purchaseDate: new Date().toISOString().slice(0, 10),
+    supplierName: '',
   });
+  const [investmentsList, setInvestmentsList] = useState<RealInvestmentEntry[]>([]);
+  const [investmentsPagination, setInvestmentsPagination] = useState<OrdersPagination | null>(null);
+  const [investmentsPage, setInvestmentsPage] = useState(1);
+  const [investmentsLoading, setInvestmentsLoading] = useState(false);
+  const [investmentsError, setInvestmentsError] = useState<string | null>(null);
+  const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
+  const [logExpenseSubmitting, setLogExpenseSubmitting] = useState(false);
+  const [logExpenseError, setLogExpenseError] = useState<string | null>(null);
+
+  // Real baker profile (GET /api/baker/profile) — backs Settings tab,
+  // Edit Profile & Legal, Manage UPI, and pre-fills the UPI form.
+  const [bakerProfile, setBakerProfile] = useState<RealBakerProfile | null>(null);
+  const [bakerProfileLoading, setBakerProfileLoading] = useState(false);
+  const [bakerProfileError, setBakerProfileError] = useState<string | null>(null);
+
+  // Real UPI settings form (PUT /api/baker/upi-settings) — the only
+  // profile field that actually has a write endpoint.
+  const [upiForm, setUpiForm] = useState({ upiId: '', merchantName: '', defaultCollectionMethod: 'UPI', generateDynamicQR: true });
+  const [upiSubmitting, setUpiSubmitting] = useState(false);
+  const [upiError, setUpiError] = useState<string | null>(null);
+  const [upiSuccess, setUpiSuccess] = useState(false);
+
+  // Real profile edit form (PATCH /api/baker/profile) — owner name, phone,
+  // and default advance percentage. Profile picture goes through the
+  // separate existing upload flow (POST /api/uploads/signed-url + confirm).
+  const [editProfileForm, setEditProfileForm] = useState({ ownerName: '', phone: '', defaultAdvancePercentage: '' });
+  const [editProfileSubmitting, setEditProfileSubmitting] = useState(false);
+  const [editProfileError, setEditProfileError] = useState<string | null>(null);
+  const [editProfileSuccess, setEditProfileSuccess] = useState(false);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+
+  // Real billing status (GET /api/billing/status)
+  const [billingStatus, setBillingStatus] = useState<RealBillingStatus | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [subscriptionSubmitting, setSubscriptionSubmitting] = useState(false);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
+
+  // POST /api/billing/create-subscription — a real Razorpay subscription
+  // creation call. This environment's RAZORPAY_KEY_ID is a LIVE key
+  // (rzp_live_...), not a test key, so this was wired but deliberately
+  // NOT click-tested during verification — see the report for why.
+  const handleConfirmSubscription = async () => {
+    setSubscriptionSubmitting(true);
+    setSubscriptionError(null);
+    try {
+      await api.post('/api/billing/create-subscription', { plan: 'EARLY_ADOPTER' });
+      setActiveSheet('none');
+      fetchBillingStatus();
+    } catch (err: any) {
+      setSubscriptionError(err.message || 'Failed to start subscription.');
+    } finally {
+      setSubscriptionSubmitting(false);
+    }
+  };
 
   // Search and filters
   const [orderSearch, setOrderSearch] = useState('');
-  const [orderTab, setOrderTab] = useState<'All' | 'In Production' | 'Ready' | 'Delivered' | 'Cancelled'>('In Production');
+  const [orderTab, setOrderTab] = useState<RealOrderTab>('All');
+  const [ordersList, setOrdersList] = useState<RealOrderListItem[]>([]);
+  const [ordersPagination, setOrdersPagination] = useState<OrdersPagination | null>(null);
+  const [ordersPage, setOrdersPage] = useState(1);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerSort, setCustomerSort] = useState('Highest Spend (LTV)');
+  const [customersList, setCustomersList] = useState<RealCustomerListItem[]>([]);
+  const [customersPagination, setCustomersPagination] = useState<OrdersPagination | null>(null);
+  const [customersPage, setCustomersPage] = useState(1);
+  const [customersLoading, setCustomersLoading] = useState(false);
+  const [customersError, setCustomersError] = useState<string | null>(null);
+
+  const [selectedCustomerProfile, setSelectedCustomerProfile] = useState<RealCustomerProfile | null>(null);
+  const [customerProfileLoading, setCustomerProfileLoading] = useState(false);
+  const [customerProfileError, setCustomerProfileError] = useState<string | null>(null);
   const [supplyTab, setSupplyTab] = useState('Chocolates');
   const [supplySearch, setSupplySearch] = useState('');
-  const [selectedDate, setSelectedDate] = useState('24'); // default 24 Oct 2023
-  const [activeMonthTab, setActiveMonthTab] = useState('Jul 26');
+  // Real calendar data (GET /api/dashboard/calendar). calendarMonth is
+  // YYYY-MM; selectedCalendarDate is YYYY-MM-DD, both real ISO forms —
+  // replacing the mock's "Jul 26" style labels entirely.
+  const todayForCalendar = new Date();
+  const [calendarMonth, setCalendarMonth] = useState(
+    `${todayForCalendar.getFullYear()}-${String(todayForCalendar.getMonth() + 1).padStart(2, '0')}`,
+  );
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(
+    todayForCalendar.toISOString().slice(0, 10),
+  );
+  const [calendarData, setCalendarData] = useState<RealCalendarData | null>(null);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarError, setCalendarError] = useState<string | null>(null);
+
+  // Whole month's orders (not just the selected date) so the list below
+  // the grid can show every date's group at once — clicking a calendar
+  // cell scrolls to that date's group via dateGroupRefs instead of
+  // re-fetching/re-filtering a single-date list.
+  const [calendarMonthOrders, setCalendarMonthOrders] = useState<RealOrderListItem[]>([]);
+  const [calendarMonthOrdersLoading, setCalendarMonthOrdersLoading] = useState(false);
+  const [calendarMonthOrdersError, setCalendarMonthOrdersError] = useState<string | null>(null);
+  const dateGroupRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // Bootstrap: the session lives in an httpOnly cookie the browser already
+  // holds after a successful login, so on load we ask the backend whether
+  // it's still valid rather than defaulting to the login screen every time.
+  useEffect(() => {
+    let cancelled = false;
+    checkSession().then((isAuthenticated) => {
+      if (cancelled) return;
+      if (isAuthenticated) {
+        setStep('dashboard');
+      }
+      setIsCheckingSession(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Fetch real dashboard summary once authenticated
+  const fetchDashboardSummary = useCallback(() => {
+    setDashboardLoading(true);
+    setDashboardError(null);
+    api
+      .get<{ success: boolean; data: DashboardSummary }>('/api/dashboard/summary')
+      .then((res) => setDashboardSummary(res.data))
+      .catch((err: any) => setDashboardError(err.message || 'Failed to load dashboard.'))
+      .finally(() => setDashboardLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (step === 'dashboard') {
+      fetchDashboardSummary();
+    }
+  }, [step, fetchDashboardSummary]);
+
+  // Fetch real orders list. Extracted as a stable callback (not just inline
+  // in the effect below) so it can also be called directly right after
+  // creating a new order — the tab/page/filter values often won't have
+  // changed in that moment, so the effect's own dependencies wouldn't
+  // otherwise fire a refetch. "All" omits the status param, which per the
+  // real backend contract defaults to excluding Cancelled orders (not
+  // literally "every order") — matching the documented endpoint behavior
+  // rather than the mock's assumption that "All" means everything.
+  const fetchOrdersList = useCallback(() => {
+    setOrdersLoading(true);
+    setOrdersError(null);
+
+    const params = new URLSearchParams();
+    params.set('page', String(ordersPage));
+    params.set('limit', '10');
+    if (orderTab !== 'All') params.set('status', orderTab);
+    if (orderSearch.trim()) params.set('search', orderSearch.trim());
+
+    api
+      .get<{ success: boolean; data: { orders: RealOrderListItem[]; pagination: OrdersPagination } }>(
+        `/api/orders?${params.toString()}`,
+      )
+      .then((res) => {
+        setOrdersList(res.data.orders);
+        setOrdersPagination(res.data.pagination);
+      })
+      .catch((err: any) => setOrdersError(err.message || 'Failed to load orders.'))
+      .finally(() => setOrdersLoading(false));
+  }, [ordersPage, orderTab, orderSearch]);
+
+  // Debounced on search, immediate on tab/page changes.
+  useEffect(() => {
+    if (step !== 'dashboard' || activeTab !== 'orders') return;
+    const handle = setTimeout(fetchOrdersList, orderSearch ? 300 : 0);
+    return () => clearTimeout(handle);
+  }, [step, activeTab, fetchOrdersList]);
+
+  // Reset to page 1 whenever the filter/search changes
+  useEffect(() => {
+    setOrdersPage(1);
+  }, [orderTab, orderSearch]);
+
+  // Fetch real customers list. The "Sort by" control in the mock is
+  // display-only (no dropdown wired, never was) — kept that way, but the
+  // displayed label ("Highest Spend (LTV)") now matches what's actually
+  // requested from the API rather than being purely cosmetic.
+  useEffect(() => {
+    if (step !== 'dashboard' || activeTab !== 'customers') return;
+
+    const handle = setTimeout(() => {
+      setCustomersLoading(true);
+      setCustomersError(null);
+
+      const params = new URLSearchParams();
+      params.set('page', String(customersPage));
+      params.set('limit', '10');
+      params.set('sort', 'lifetimeValue');
+      params.set('order', 'desc');
+      if (customerSearch.trim()) params.set('search', customerSearch.trim());
+
+      api
+        .get<{ success: boolean; data: { customers: RealCustomerListItem[]; pagination: OrdersPagination } }>(
+          `/api/customers?${params.toString()}`,
+        )
+        .then((res) => {
+          setCustomersList(res.data.customers);
+          setCustomersPagination(res.data.pagination);
+        })
+        .catch((err: any) => setCustomersError(err.message || 'Failed to load customers.'))
+        .finally(() => setCustomersLoading(false));
+    }, customerSearch ? 300 : 0);
+
+    return () => clearTimeout(handle);
+  }, [step, activeTab, customerSearch, customersPage]);
+
+  useEffect(() => {
+    setCustomersPage(1);
+  }, [customerSearch]);
+
+  // Real investments/expense ledger (GET /api/investments)
+  const fetchInvestments = useCallback(() => {
+    setInvestmentsLoading(true);
+    setInvestmentsError(null);
+    const params = new URLSearchParams();
+    params.set('page', String(investmentsPage));
+    params.set('limit', '10');
+    api
+      .get<{ success: boolean; data: { entries: RealInvestmentEntry[]; pagination: OrdersPagination } }>(
+        `/api/investments?${params.toString()}`,
+      )
+      .then((res) => {
+        setInvestmentsList(res.data.entries);
+        setInvestmentsPagination(res.data.pagination);
+      })
+      .catch((err: any) => setInvestmentsError(err.message || 'Failed to load expenses.'))
+      .finally(() => setInvestmentsLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [investmentsPage]);
+
+  // "Spent this Month" — a separate lightweight query scoped to the
+  // current calendar month (from/to), since the main list above is
+  // intentionally unscoped/paginated across all-time entries.
+  const fetchMonthlySpend = useCallback(() => {
+    const now = new Date();
+    const from = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    const to = now.toISOString().slice(0, 10);
+    api
+      .get<{ success: boolean; data: { summary: { totalExpense: number } } }>(
+        `/api/investments?from=${from}&to=${to}&limit=1`,
+      )
+      .then((res) => setMonthlySpend(res.data.summary.totalExpense))
+      .catch(() => setMonthlySpend(null));
+  }, []);
+
+  useEffect(() => {
+    if (step === 'dashboard' && activeTab === 'expenses') {
+      fetchInvestments();
+      fetchMonthlySpend();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, activeTab, investmentsPage]);
+
+  // Real baker profile — fetched once entering the app and refetched after
+  // any successful UPI-settings save so the Settings tab reflects it.
+  const fetchBakerProfile = useCallback(() => {
+    setBakerProfileLoading(true);
+    setBakerProfileError(null);
+    api
+      .get<{ success: boolean; data: RealBakerProfile }>('/api/baker/profile')
+      .then((res) => {
+        setBakerProfile(res.data);
+        setUpiForm({
+          upiId: res.data.payment.upiId || '',
+          merchantName: res.data.payment.merchantName || '',
+          defaultCollectionMethod: res.data.payment.defaultCollectionMethod,
+          generateDynamicQR: res.data.payment.dynamicQrEnabled,
+        });
+        setEditProfileForm({
+          ownerName: res.data.business.ownerName || '',
+          phone: res.data.business.phone || '',
+          defaultAdvancePercentage:
+            res.data.payment.defaultAdvancePercentage !== null ? String(res.data.payment.defaultAdvancePercentage) : '',
+        });
+      })
+      .catch((err: any) => setBakerProfileError(err.message || 'Failed to load profile.'))
+      .finally(() => setBakerProfileLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (step === 'dashboard') {
+      fetchBakerProfile();
+    }
+  }, [step, fetchBakerProfile]);
+
+  const handleSaveUpiSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setUpiSubmitting(true);
+    setUpiError(null);
+    setUpiSuccess(false);
+    try {
+      await api.put('/api/baker/upi-settings', upiForm);
+      setUpiSuccess(true);
+      fetchBakerProfile();
+    } catch (err: any) {
+      setUpiError(err.message || 'Failed to update UPI settings.');
+    } finally {
+      setUpiSubmitting(false);
+    }
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEditProfileSubmitting(true);
+    setEditProfileError(null);
+    setEditProfileSuccess(false);
+    try {
+      const body: Record<string, unknown> = {};
+      if (editProfileForm.ownerName.trim()) body.ownerName = editProfileForm.ownerName.trim();
+      if (editProfileForm.phone.trim()) body.phone = editProfileForm.phone.trim();
+      if (editProfileForm.defaultAdvancePercentage !== '') {
+        body.defaultAdvancePercentage = Number(editProfileForm.defaultAdvancePercentage);
+      }
+      const res = await api.patch<{
+        success: boolean;
+        data: { ownerName: string | null; phone: string | null; defaultAdvancePercentage: number | null; updatedAt: string };
+      }>('/api/baker/profile', body);
+      // Update the already-loaded profile in place from the save response
+      // — no refetch, so no loading flash and no lost scroll position.
+      setBakerProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              business: { ...prev.business, ownerName: res.data.ownerName, phone: res.data.phone || prev.business.phone },
+              payment: { ...prev.payment, defaultAdvancePercentage: res.data.defaultAdvancePercentage },
+            }
+          : prev,
+      );
+      setEditProfileSuccess(true);
+    } catch (err: any) {
+      setEditProfileError(err.message || 'Failed to update profile.');
+    } finally {
+      setEditProfileSubmitting(false);
+    }
+  };
+
+  // Profile picture upload — reuses the existing generic private-bucket
+  // signed-upload flow (POST /api/uploads/signed-url + /confirm), the same
+  // one already built for logoPath (BUSINESS_LOGO category). The client
+  // uploads the file directly to the returned signed URL (a plain PUT —
+  // Supabase's signed-upload URL embeds its own auth token, no additional
+  // headers/keys needed), then confirms so the backend persists logoPath.
+  const handleProfilePictureUpload = async (file: File) => {
+    setLogoUploading(true);
+    setLogoUploadError(null);
+    try {
+      const { data } = await api.post<{ success: boolean; data: { uploadUrl: string; filePath: string } }>(
+        '/api/uploads/signed-url',
+        { contentType: file.type, category: 'BUSINESS_LOGO', originalFilename: file.name },
+      );
+
+      const uploadRes = await fetch(data.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!uploadRes.ok) {
+        throw new Error('Upload to storage failed. Please try again.');
+      }
+
+      await api.post('/api/uploads/confirm', { filePath: data.filePath, category: 'BUSINESS_LOGO' });
+      fetchBakerProfile();
+    } catch (err: any) {
+      setLogoUploadError(err.message || 'Failed to upload profile picture.');
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
+  // Real billing status — fetched when the Subscription & AutoPay sheet opens.
+  const fetchBillingStatus = useCallback(() => {
+    setBillingLoading(true);
+    setBillingError(null);
+    api
+      .get<{ success: boolean; data: RealBillingStatus }>('/api/billing/status')
+      .then((res) => setBillingStatus(res.data))
+      .catch((err: any) => setBillingError(err.message || 'Failed to load billing status.'))
+      .finally(() => setBillingLoading(false));
+  }, []);
+
+  // Real calendar month aggregation (GET /api/dashboard/calendar)
+  useEffect(() => {
+    if (step !== 'dashboard' || activeTab !== 'calendar') return;
+    setCalendarLoading(true);
+    setCalendarError(null);
+    api
+      .get<{ success: boolean; data: RealCalendarData }>(`/api/dashboard/calendar?view=month&month=${calendarMonth}`)
+      .then((res) => setCalendarData(res.data))
+      .catch((err: any) => setCalendarError(err.message || 'Failed to load calendar.'))
+      .finally(() => setCalendarLoading(false));
+  }, [step, activeTab, calendarMonth]);
+
+  // Real whole-month order list (GET /api/orders?from=&to=), grouped by
+  // date for rendering below the calendar grid. limit=100 covers realistic
+  // monthly volume for a home bakery; a busier baker exceeding that in a
+  // single month would need pagination here, not handled yet.
+  useEffect(() => {
+    if (step !== 'dashboard' || activeTab !== 'calendar') return;
+    setCalendarMonthOrdersLoading(true);
+    setCalendarMonthOrdersError(null);
+    const [y, m] = calendarMonth.split('-').map(Number);
+    const monthStart = `${calendarMonth}-01`;
+    const monthEnd = `${calendarMonth}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+    api
+      .get<{ success: boolean; data: { orders: RealOrderListItem[] } }>(
+        `/api/orders?from=${monthStart}&to=${monthEnd}&limit=100&sort=deliveryDate&order=asc`,
+      )
+      .then((res) => setCalendarMonthOrders(res.data.orders))
+      .catch((err: any) => setCalendarMonthOrdersError(err.message || 'Failed to load deliveries.'))
+      .finally(() => setCalendarMonthOrdersLoading(false));
+  }, [step, activeTab, calendarMonth]);
 
   // OTP Timer countdown
   useEffect(() => {
-    let interval: any = null;
+    let interval: ReturnType<typeof setInterval> | null = null;
     if (step === 'otp' && otpTimer > 0) {
       interval = setInterval(() => {
         setOtpTimer((prev) => prev - 1);
       }, 1000);
     }
-    return () => clearInterval(interval);
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
   }, [step, otpTimer]);
 
   // Handle document level dark mode sync
@@ -166,106 +799,186 @@ export default function Webapp() {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   };
 
-  const handleGetOtp = () => {
-    if (phoneNumber.trim().length >= 10) {
+  const validateEmail = (emailStr: string) => {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailStr.trim());
+  };
+
+  const handleSendOtp = async () => {
+    if (isVerifying) return;
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setOtpError('Please enter your email address.');
+      return;
+    }
+
+    if (!validateEmail(trimmedEmail)) {
+      setOtpError('Please enter a valid email address.');
+      return;
+    }
+
+    setIsVerifying(true);
+    setOtpError('');
+
+    try {
+      await sendEmailOtp(trimmedEmail);
       setStep('otp');
       setOtpTimer(29);
-      setOtpError('');
-    } else {
-      setOtpError('Please enter a valid 10-digit mobile number.');
+      setOtpFields(['', '', '', '', '', '']);
+    } catch (err: any) {
+      setOtpError(err.message || 'Failed to send verification code. Please try again.');
+    } finally {
+      setIsVerifying(false);
     }
   };
 
-  const handleVerifyOtp = () => {
+  const handleVerifyOtp = async () => {
+    if (isVerifying) return;
+
     const code = otpFields.join('');
-    if (code.length === 4) {
+    if (code.length !== 6) {
+      setOtpError('Invalid code. Please enter the 6-digit PIN.');
+      return;
+    }
+
+    setIsVerifying(true);
+    setOtpError('');
+
+    try {
+      await verifyEmailOtp(email.trim(), code);
+      // Session lives in the httpOnly cookie the backend just set on this
+      // response — nothing to store client-side.
       setStep('dashboard');
-      setActiveTab('home');
-    } else {
-      setOtpError('Invalid code. Please enter 4 digits.');
+    } catch (err: any) {
+      setOtpError(err.message || 'Invalid verification code. Please try again.');
+    } finally {
+      setIsVerifying(false);
     }
   };
 
-  const handleLogExpense = (e: React.FormEvent) => {
+  const handleLogExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!expenseForm.item || !expenseForm.amount) return;
+    if (!expenseForm.materialName || !expenseForm.quantity || !expenseForm.unit || !expenseForm.pricePerUnit) return;
 
-    const newExp: Expense = {
-      id: `E-${expenses.length + 1}`,
-      item: expenseForm.item,
-      amount: parseFloat(expenseForm.amount),
-      date: 'Oct 24, 2023',
-      category: expenseForm.category
-    };
-
-    setExpenses([newExp, ...expenses]);
-    setExpenseForm({ item: '', amount: '', category: 'Raw Material' });
+    setLogExpenseSubmitting(true);
+    setLogExpenseError(null);
+    try {
+      await api.post('/api/investments', {
+        category: expenseForm.category,
+        materialName: expenseForm.materialName,
+        quantity: Number(expenseForm.quantity),
+        unit: expenseForm.unit,
+        pricePerUnit: Number(expenseForm.pricePerUnit),
+        purchaseDate: expenseForm.purchaseDate,
+        supplierName: expenseForm.supplierName || undefined,
+      });
+      setExpenseForm({
+        materialName: '',
+        category: 'ingredients',
+        quantity: '',
+        unit: '',
+        pricePerUnit: '',
+        purchaseDate: new Date().toISOString().slice(0, 10),
+        supplierName: '',
+      });
+      fetchInvestments();
+      fetchMonthlySpend();
+    } catch (err: any) {
+      setLogExpenseError(err.message || 'Failed to log expense.');
+    } finally {
+      setLogExpenseSubmitting(false);
+    }
   };
 
-  const handleCreateOrder = (e: React.FormEvent) => {
+  const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newOrderForm.customerName || !newOrderForm.totalAmount) return;
+    setNewOrderError(null);
 
+    if (!newOrderForm.customerName.trim()) {
+      setNewOrderError('Customer name is required.');
+      return;
+    }
     const total = parseFloat(newOrderForm.totalAmount);
+    if (!total || total <= 0) {
+      setNewOrderError('Total amount must be greater than ₹0.');
+      return;
+    }
     const advance = parseFloat(newOrderForm.advanceAmount || '0');
-
-    const newOrder: Order = {
-      id: `K-${1000 + orders.length + 5}`,
-      cakeName: `${newOrderForm.weight} ${newOrderForm.cakeCategory}`,
-      customerName: newOrderForm.customerName,
-      phone: newOrderForm.phone || '+91 99999 99999',
-      deliveryDate: newOrderForm.date,
-      deliveryTime: newOrderForm.time,
-      status: 'In Production',
-      advanceAmount: advance,
-      totalAmount: total,
-      type: newOrderForm.type
-    };
-
-    setOrders([newOrder, ...orders]);
-
-    // Update customer CRM records
-    const existingIndex = customers.findIndex(c => c.name.toLowerCase() === newOrderForm.customerName.toLowerCase());
-    if (existingIndex > -1) {
-      const updated = [...customers];
-      updated[existingIndex].ordersCount += 1;
-      updated[existingIndex].ltv += total;
-      updated[existingIndex].lastOrderDate = 'Oct 24, 2023';
-      setCustomers(updated);
-    } else {
-      setCustomers([
-        {
-          name: newOrderForm.customerName,
-          phone: newOrderForm.phone || '+91 99999 99999',
-          tag: '',
-          ordersCount: 1,
-          lastOrderDate: 'Oct 24, 2023',
-          ltv: total
-        },
-        ...customers
-      ]);
+    if (advance > total) {
+      setNewOrderError('Advance received cannot exceed the total amount.');
+      return;
+    }
+    if (!newOrderForm.date) {
+      setNewOrderError('Delivery date is required.');
+      return;
     }
 
-    setNewOrderForm({
-      customerName: '',
-      phone: '',
-      cakeCategory: 'Chocolate Truffle',
-      weight: '1.5 kg',
-      date: '2023-10-24',
-      time: '4:00 PM',
-      type: 'Pickup',
-      totalAmount: '',
-      advanceAmount: ''
-    });
-    setActiveSheet('none');
+    let weightInPounds: number | undefined;
+    if (newOrderForm.weightPreset === 'custom') {
+      const w = parseFloat(newOrderForm.weightCustom);
+      if (!w || w <= 0) {
+        setNewOrderError('Enter a valid custom weight in pounds.');
+        return;
+      }
+      weightInPounds = w;
+    } else {
+      weightInPounds = parseFloat(newOrderForm.weightPreset);
+    }
+
+    setNewOrderSubmitting(true);
+    try {
+      await api.post<{ success: boolean; data: { orderId: string; orderNumber: string; balanceDue: number; status: string } }>(
+        '/api/orders',
+        {
+          customer: {
+            name: newOrderForm.customerName.trim(),
+            phone: newOrderForm.phone.trim() || null,
+            address: newOrderForm.address.trim() || undefined,
+          },
+          cake: {
+            category: newOrderForm.cakeCategory,
+            flavour: newOrderForm.flavour,
+            weightInPounds,
+            quantity: newOrderForm.quantity ? Number(newOrderForm.quantity) : undefined,
+          },
+          occasion: newOrderForm.occasion.trim() || undefined,
+          delivery: {
+            type: newOrderForm.deliveryType === 'Delivery' ? 'delivery' : 'pickup',
+            date: newOrderForm.date,
+            time: newOrderForm.time || undefined,
+            charge:
+              newOrderForm.deliveryType === 'Delivery' && newOrderForm.deliveryCharge
+                ? Number(newOrderForm.deliveryCharge)
+                : undefined,
+          },
+          payment: {
+            totalPrice: total,
+            advancePaid: advance,
+            paymentMethod: newOrderForm.paymentMethod,
+          },
+        },
+      );
+
+      setNewOrderForm(getDefaultNewOrderForm());
+      setNewOrderAdvanceTouched(false);
+      setActiveSheet('none');
+
+      // Real order now exists server-side — refresh every screen that
+      // reads real order data so it's reflected immediately rather than
+      // only on next navigation. Calendar/Orders-tab effects already
+      // refetch on their own whenever the user navigates into them, but
+      // Dashboard (and Orders, if that's the tab the sheet was opened
+      // from) won't re-run their effects just because a sheet closed.
+      fetchDashboardSummary();
+      fetchOrdersList();
+    } catch (err: any) {
+      setNewOrderError(err.message || 'Failed to create order.');
+    } finally {
+      setNewOrderSubmitting(false);
+    }
   };
 
   const totalCollectedThisMonth = expenses.reduce((sum, e) => sum + e.amount, 0);
-  const outstandingBalance = orders
-    .filter(o => o.status !== 'Delivered' && o.status !== 'Cancelled')
-    .reduce((sum, o) => sum + (o.totalAmount - o.advanceAmount), 0);
-
-  const deliveriesTodayCount = orders.filter(o => o.deliveryDate === '2023-10-24').length;
 
   // Navigation config array for desktop/sidebar layout
   const navigationItems = [
@@ -278,183 +991,178 @@ export default function Webapp() {
     { id: 'settings', label: 'Settings', icon: SettingsIcon },
   ] as const;
 
-  const monthsList = ['May 26', 'Jun 26', 'Jul 26', 'Aug 26', 'Sept 26', 'Oct 26'];
-  const monthData: Record<string, { label: string; delivered: string; estTotal: string; orders: number; startOffset: number; totalDays: number }> = {
-    'May 26': { label: 'May 2026', delivered: '₹4,120', estTotal: '₹6,400', orders: 8, startOffset: 5, totalDays: 31 },
-    'Jun 26': { label: 'June 2026', delivered: '₹8,450', estTotal: '₹11,200', orders: 16, startOffset: 1, totalDays: 30 },
-    'Jul 26': { label: 'July 2026', delivered: '₹10,315', estTotal: '₹12,875', orders: 29, startOffset: 3, totalDays: 31 },
-    'Aug 26': { label: 'August 2026', delivered: '₹0', estTotal: '₹950', orders: 1, startOffset: 6, totalDays: 31 },
-    'Sept 26': { label: 'September 2026', delivered: '₹0', estTotal: '₹1,200', orders: 1, startOffset: 2, totalDays: 30 },
-    'Oct 26': { label: 'October 2026', delivered: '₹0', estTotal: '₹1,500', orders: 1, startOffset: 4, totalDays: 31 },
-  };
+  const orderTabs: RealOrderTab[] = ['All', 'Pending', 'Confirmed', 'In Progress', 'Ready', 'Delivered', 'Cancelled'];
+  const expenseCategories = REAL_INVESTMENT_CATEGORIES;
 
-  const calendarDeliveries: Record<string, Record<number, { customer: string; cake: string; type: 'green' | 'yellow' | 'blue'; moreCount?: number }[]>> = {
-    'Jul 26': {
-      9: [{ customer: 'Shiuly', cake: 'Birthday cake', type: 'green' }],
-      12: [{ customer: 'Jui', cake: 'Bento cake', type: 'green', moreCount: 2 }],
-      13: [{ customer: 'Ishani', cake: 'Anniversary ..', type: 'green', moreCount: 2 }],
-      14: [{ customer: 'Putul', cake: 'Custom / oth..', type: 'green', moreCount: 2 }],
-      15: [{ customer: 'Mitali', cake: 'Tub Cake', type: 'green', moreCount: 1 }],
-      16: [{ customer: 'Boumoni', cake: 'Birthday cake', type: 'green' }],
-      18: [{ customer: 'Santu', cake: 'Bento cake', type: 'green' }],
-      19: [{ customer: 'Maa', cake: 'Custom / oth..', type: 'green' }],
-      20: [{ customer: 'Tithi', cake: 'Tub Cake', type: 'green', moreCount: 3 }],
-      21: [{ customer: 'Arati', cake: 'Birthday cake', type: 'green', moreCount: 1 }],
-      22: [{ customer: 'Anno', cake: 'Bento cake', type: 'green', moreCount: 2 }],
-      23: [{ customer: 'Mitali', cake: 'Tub Cake', type: 'green', moreCount: 1 }],
-      24: [{ customer: 'Antu', cake: 'Bento cake', type: 'yellow' }],
-      28: [{ customer: 'Chayan D...', cake: 'Birthday cake', type: 'blue' }],
-      30: [{ customer: 'Jyoti', cake: 'Wedding cake', type: 'blue' }]
-    }
-  };
+  // Derived, real calendar-month bookkeeping (replacing the mock's fixed
+  // "Jul 26"-labelled objects). calendarMonth is always YYYY-MM.
+  const [calendarMonthYear, calendarMonthNum] = calendarMonth.split('-').map(Number);
+  const calendarMonthLabel = new Date(calendarMonthYear, calendarMonthNum - 1, 1).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
+  const calendarDaysInMonth = new Date(calendarMonthYear, calendarMonthNum, 0).getDate();
+  const calendarStartOffset = new Date(calendarMonthYear, calendarMonthNum - 1, 1).getDay();
+  const calendarMonthTotals = (calendarData?.days ?? []).reduce(
+    (acc, d) => ({
+      totalOrders: acc.totalOrders + d.totalOrders,
+      outstandingBalance: acc.outstandingBalance + d.outstandingBalance,
+    }),
+    { totalOrders: 0, outstandingBalance: 0 },
+  );
 
-  const handlePrevMonth = () => {
-    const currentIdx = monthsList.indexOf(activeMonthTab);
-    if (currentIdx > 0) {
-      const nextTab = monthsList[currentIdx - 1];
-      setActiveMonthTab(nextTab);
-      setSelectedDate(nextTab === 'Jul 26' ? '24' : '1');
-    }
+  const shiftCalendarMonth = (delta: number) => {
+    const d = new Date(calendarMonthYear, calendarMonthNum - 1 + delta, 1);
+    setCalendarMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
   };
-
-  const handleNextMonth = () => {
-    const currentIdx = monthsList.indexOf(activeMonthTab);
-    if (currentIdx < monthsList.length - 1) {
-      const nextTab = monthsList[currentIdx + 1];
-      setActiveMonthTab(nextTab);
-      setSelectedDate(nextTab === 'Jul 26' ? '24' : '1');
-    }
-  };
+  const handlePrevMonth = () => shiftCalendarMonth(-1);
+  const handleNextMonth = () => shiftCalendarMonth(1);
 
   return (
     <div className="min-h-screen w-full flex justify-center bg-zinc-100 dark:bg-zinc-950 transition-colors duration-300">
       <div className="noise-bg h-screen max-h-screen w-full max-w-[480px] flex flex-col bg-[var(--background)] shadow-2xl border-x border-[var(--border)] relative overflow-hidden">
 
-        {/* 1. ONBOARDING LOGIN VIEW */}
-        {step === 'login' && (
-          <div className="flex-1 flex flex-col items-center justify-start pt-20 pb-12 px-6">
-            <div className="w-full max-w-sm flex flex-col items-center">
-
-              <div className="w-56 h-18 mb-6 relative select-none flex items-center justify-center">
-                <img
-                  src={theme === 'dark' ? "/dark-bg-logo.png" : "/light-bg-logo.png"}
-                  alt="Kamai Logo"
-                  className="w-full h-full object-contain"
-                />
+            {/* SESSION BOOTSTRAP CHECK — avoids flashing the login screen while we ask the backend if the httpOnly cookie is still valid */}
+            {isCheckingSession && (
+              <div className="flex-1 flex items-center justify-center">
+                <div className="w-8 h-8 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
               </div>
+            )}
 
-              <h1 className="font-serif text-[36px] font-bold text-center leading-[1.1] text-[var(--text-primary)] mb-4">
-                Turn Baking<br />Chaos Into Profit.
-              </h1>
+            {/* 1. ONBOARDING LOGIN VIEW */}
+            {!isCheckingSession && step === 'login' && (
+              <div className="flex-1 flex flex-col items-center justify-start pt-20 pb-12 px-6">
+                <div className="w-full max-w-sm flex flex-col items-center">
 
-              <p className="text-center text-[14.5px] leading-relaxed text-[var(--text-secondary)] mb-10 max-w-xs">
-                Enter your mobile number to log in<br />or create your bakery's workspace.
-              </p>
-
-              <div className="w-full mb-6">
-                <div className="flex border border-[var(--border)] rounded-2xl bg-[var(--surface)] overflow-hidden focus-within:border-[var(--accent)] transition-all h-[56px] items-center">
-                  <button className="flex items-center gap-1.5 px-4 h-full border-r border-[var(--border)] text-sm font-semibold hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors text-[var(--text-primary)]">
-                    +91 <ChevronDown size={14} className="text-[var(--text-secondary)]" />
-                  </button>
-                  <input
-                    type="tel"
-                    placeholder="Enter 10-digit mobile number"
-                    value={phoneNumber}
-                    onChange={(e) => setPhoneNumber(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                    className="w-full h-full px-4 text-[14.5px] font-medium outline-none bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)]/50"
-                  />
-                </div>
-
-                {otpError && (
-                  <div className="flex items-center gap-1.5 text-red-600 text-xs px-1 mt-2">
-                    <AlertCircle size={14} />
-                    <span>{otpError}</span>
+                  <div className="w-56 h-18 mb-6 relative select-none flex items-center justify-center">
+                    <img
+                      src={theme === 'dark' ? "/dark-bg-logo.png" : "/light-bg-logo.png"}
+                      alt="Kamai Logo"
+                      className="w-full h-full object-contain"
+                    />
                   </div>
-                )}
+
+                  <h1 className="font-serif text-[36px] font-bold text-center leading-[1.1] text-[var(--text-primary)] mb-4">
+                    Turn Baking<br />Chaos Into Profit.
+                  </h1>
+
+                  <p className="text-center text-[14.5px] leading-relaxed text-[var(--text-secondary)] mb-10 max-w-xs">
+                    Enter your email address to log in<br />or create your bakery&apos;s workspace.
+                  </p>
+
+                  <div className="w-full mb-6">
+                    <div className="flex border border-[var(--border)] rounded-2xl bg-[var(--surface)] overflow-hidden focus-within:border-[var(--accent)] transition-all h-[56px] items-center px-4 gap-3">
+                      <Mail size={18} className="text-[var(--text-secondary)] shrink-0" />
+                      <input
+                        type="email"
+                        placeholder="Enter your email address"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSendOtp();
+                        }}
+                        className="w-full h-full text-[14.5px] font-medium outline-none bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)]/50"
+                      />
+                    </div>
+
+                    {otpError && (
+                      <div className="flex items-center gap-1.5 text-red-600 text-xs px-1 mt-2">
+                        <AlertCircle size={14} />
+                        <span>{otpError}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={handleSendOtp}
+                    disabled={isVerifying}
+                    className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-neutral-400 text-white font-bold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] cursor-pointer text-sm tracking-wide h-[54px] flex items-center justify-center mb-8"
+                  >
+                    {isVerifying ? 'Sending Code...' : 'Send Verification Code'}
+                  </button>
+
+                  <p className="text-center text-[11px] leading-relaxed text-[var(--text-secondary)] px-4 max-w-[280px]">
+                    By continuing, you agree to Kamai&apos;s<br />
+                    <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Terms of Service</span> and <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Privacy Policy</span>.
+                  </p>
+                </div>
               </div>
+            )}
 
-              <button
-                onClick={handleGetOtp}
-                className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-bold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] cursor-pointer text-sm tracking-wide h-[54px] flex items-center justify-center mb-8"
-              >
-                Get OTP
-              </button>
+            {/* 2. ONBOARDING OTP VIEW */}
+            {step === 'otp' && (
+              <div className="flex-1 flex flex-col items-center justify-start pt-20 pb-12 px-6">
+                <div className="w-full max-w-sm flex flex-col items-stretch">
 
-              <p className="text-center text-[11px] leading-relaxed text-[var(--text-secondary)] px-4 max-w-[280px]">
-                By continuing, you agree to Kamai's<br />
-                <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Terms of Service</span> and <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Privacy Policy</span>.
-              </p>
-            </div>
-          </div>
-        )}
+                  <div className="w-56 h-18 mb-6 self-center relative select-none flex items-center justify-center">
+                    <img
+                      src={theme === 'dark' ? "/dark-bg-logo.png" : "/light-bg-logo.png"}
+                      alt="Kamai Logo"
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
 
-        {/* 2. ONBOARDING OTP VIEW */}
-        {step === 'otp' && (
-          <div className="flex-1 flex flex-col items-center justify-start pt-20 pb-12 px-6">
-            <div className="w-full max-w-sm flex flex-col items-stretch">
+                  <h1 className="font-serif text-[32px] font-bold text-center leading-[1.1] text-[var(--text-primary)] mb-4">
+                    Verify your email.
+                  </h1>
 
+                  <p className="text-center text-[14.5px] leading-relaxed text-[var(--text-secondary)] mb-8 px-2">
+                    We&apos;ve sent a 6-digit secure PIN to<br />
+                    <span className="font-semibold text-[var(--text-primary)]">{email}</span>. <span className="text-[var(--accent)] cursor-pointer hover:underline font-bold ml-1" onClick={() => setStep('login')}>Edit</span>
+                  </p>
 
-              <div className="w-56 h-18 mb-6 self-center relative select-none flex items-center justify-center">
-                <img
-                  src={theme === 'dark' ? "/dark-bg-logo.png" : "/light-bg-logo.png"}
-                  alt="Kamai Logo"
-                  className="w-full h-full object-contain"
-                />
+                  <div className="flex justify-between gap-2 mb-8 max-w-[340px] mx-auto w-full">
+                    {otpFields.map((val, idx) => (
+                      <input
+                        key={idx}
+                        id={`otp-${idx}`}
+                        type="text"
+                        pattern="\d*"
+                        maxLength={1}
+                        value={val}
+                        onChange={(e) => {
+                          const newVals = [...otpFields];
+                          newVals[idx] = e.target.value.replace(/\D/g, '');
+                          setOtpFields(newVals);
+                          if (e.target.value && idx < 5) {
+                            document.getElementById(`otp-${idx + 1}`)?.focus();
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Backspace' && !val && idx > 0) {
+                            document.getElementById(`otp-${idx - 1}`)?.focus();
+                          }
+                        }}
+                        className="w-11 h-14 text-center text-2xl font-bold rounded-2xl border-2 border-[var(--border)] focus:border-[var(--accent)] outline-none bg-[var(--surface)] transition-all text-[var(--text-primary)] caret-[var(--accent)] shadow-sm"
+                      />
+                    ))}
+                  </div>
+
+                  {otpError && (
+                    <div className="flex items-center gap-1.5 text-red-600 text-xs px-1 mb-4 justify-center">
+                      <AlertCircle size={14} />
+                      <span>{otpError}</span>
+                    </div>
+                  )}
+
+                  <p className="text-center text-[13px] font-medium text-[var(--text-secondary)] mb-8">
+                    Didn&apos;t receive the code? {otpTimer > 0 ? (
+                      <span>Resend in <span className="text-[var(--accent)] font-semibold">00:{otpTimer < 10 ? `0${otpTimer}` : otpTimer}</span></span>
+                    ) : (
+                      <span className="text-[var(--accent)] font-semibold cursor-pointer hover:underline" onClick={() => { setOtpTimer(29); handleSendOtp(); }}>Resend Code</span>
+                    )}
+                  </p>
+
+                  <button
+                    onClick={handleVerifyOtp}
+                    disabled={isVerifying}
+                    className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-neutral-400 text-white font-bold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] cursor-pointer text-sm tracking-wide h-[54px] flex items-center justify-center"
+                  >
+                    {isVerifying ? 'Verifying...' : 'Verify & Enter Cockpit'}
+                  </button>
+                </div>
               </div>
-
-              <h1 className="font-serif text-[32px] font-bold text-center leading-[1.1] text-[var(--text-primary)] mb-4">
-                Verify your number.
-              </h1>
-
-              <p className="text-center text-[14.5px] leading-relaxed text-[var(--text-secondary)] mb-8 px-2">
-                We've sent a 4-digit secure PIN to<br />
-                <span className="font-semibold text-[var(--text-primary)]">+91 {phoneNumber.slice(0, 5) + ' ' + phoneNumber.slice(5)}</span>. <span className="text-[var(--accent)] cursor-pointer hover:underline font-bold ml-1" onClick={() => setStep('login')}>Edit</span>
-              </p>
-
-              <div className="flex justify-between gap-3 mb-8 max-w-[290px] mx-auto w-full">
-                {otpFields.map((val, idx) => (
-                  <input
-                    key={idx}
-                    id={`otp-${idx}`}
-                    type="text"
-                    pattern="\d*"
-                    maxLength={1}
-                    value={val}
-                    onChange={(e) => {
-                      const newVals = [...otpFields];
-                      newVals[idx] = e.target.value.replace(/\D/g, '');
-                      setOtpFields(newVals);
-                      if (e.target.value && idx < 3) {
-                        document.getElementById(`otp-${idx + 1}`)?.focus();
-                      }
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Backspace' && !val && idx > 0) {
-                        document.getElementById(`otp-${idx - 1}`)?.focus();
-                      }
-                    }}
-                    className="w-16 h-20 text-center text-3xl font-bold rounded-2xl border-2 border-[var(--border)] focus:border-[var(--accent)] outline-none bg-[var(--surface)] transition-all text-[var(--text-primary)] caret-[var(--accent)] shadow-sm"
-                  />
-                ))}
-              </div>
-
-              <p className="text-center text-[13px] font-medium text-[var(--text-secondary)] mb-8">
-                Didn't receive the code? {otpTimer > 0 ? (
-                  <span>Resend in <span className="text-[var(--accent)] font-semibold">00:{otpTimer < 10 ? `0${otpTimer}` : otpTimer}</span></span>
-                ) : (
-                  <span className="text-[var(--accent)] font-semibold cursor-pointer hover:underline" onClick={() => setOtpTimer(29)}>Resend Code</span>
-                )}
-              </p>
-
-              <button
-                onClick={handleVerifyOtp}
-                className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-bold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] cursor-pointer text-sm tracking-wide h-[54px] flex items-center justify-center"
-              >
-                Verify & Enter Cockpit
-              </button>
-            </div>
-          </div>
-        )}
+            )}
 
         {/* 3. MAIN DASHBOARD VIEW - MOBILE ONLY */}
         {step === 'dashboard' && (
@@ -507,10 +1215,10 @@ export default function Webapp() {
                   {/* Header Welcome Title */}
                   <div className="mb-8">
                     <h2 className="font-serif text-3xl md:text-4xl font-semibold leading-tight text-[var(--text-primary)]">
-                      Hello, {bakeryName} <span className="inline-block animate-wiggle">👋</span>
+                      Hello, {bakerProfile?.business.businessName || 'there'} <span className="inline-block animate-wiggle">👋</span>
                     </h2>
                     <p className="text-xs md:text-sm text-[var(--text-secondary)] mt-1">
-                      Here's what's happening with your bakery today.
+                      Here&apos;s what&apos;s happening with your bakery today.
                     </p>
                   </div>
 
@@ -530,7 +1238,11 @@ export default function Webapp() {
                           <AlertCircle size={16} className="text-[var(--accent)]" />
                         </div>
                         <div className="mt-4">
-                          <span className="text-3xl font-extrabold tracking-tight">₹{outstandingBalance.toLocaleString('en-IN')}</span>
+                          {dashboardLoading ? (
+                            <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
+                          ) : (
+                            <span className="text-3xl font-extrabold tracking-tight">₹{(dashboardSummary?.outstandingBalance ?? 0).toLocaleString('en-IN')}</span>
+                          )}
                           <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">Outstanding balance to recover</p>
                         </div>
                       </div>
@@ -545,15 +1257,26 @@ export default function Webapp() {
                           <ShoppingBag size={16} className="text-[var(--accent)]" />
                         </div>
                         <div className="mt-4">
-                          <span className="text-3xl font-extrabold tracking-tight">{deliveriesTodayCount} Orders</span>
+                          {dashboardLoading ? (
+                            <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
+                          ) : (
+                            <span className="text-3xl font-extrabold tracking-tight">{dashboardSummary?.todayDeliveries ?? 0} Orders</span>
+                          )}
                           <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">Scheduled for delivery today</p>
                         </div>
                       </div>
 
                     </div>
 
-                    {/* Trial End Warning (if active) */}
-                    {isTrialEnding && (
+                    {dashboardError && (
+                      <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
+                        <span className="flex items-center gap-2"><AlertCircle size={14} /> {dashboardError}</span>
+                        <button onClick={fetchDashboardSummary} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                      </div>
+                    )}
+
+                    {/* Trial End Warning — real bakerProfile.subscription data */}
+                    {bakerProfile?.subscription.status === 'TRIAL' && (
                       <div
                         onClick={() => setActiveSheet('subscription-status')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all flex items-center gap-4 w-full"
@@ -562,8 +1285,8 @@ export default function Webapp() {
                         <span className="text-4xl flex-shrink-0">🎂</span>
                         <div className="flex-1 min-w-0">
                           <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">Your free trial is ending soon.</h4>
-                          <div className="inline-flex items-center gap-1.5 bg-[#EA580C] text-white px-3 py-1 rounded-full text-[10.5px] font-semibold mt-2">
-                            7 Days Remaining
+                          <div className="inline-flex items-center gap-1.5 bg-[var(--accent)] text-white px-3 py-1 rounded-full text-[10.5px] font-semibold mt-2">
+                            {bakerProfile.subscription.trialDaysRemaining} Days Remaining
                           </div>
                         </div>
                         <ChevronRight size={18} className="text-[var(--text-secondary)] flex-shrink-0" />
@@ -584,53 +1307,113 @@ export default function Webapp() {
                       </span>
                     </div>
 
-                    {/* Stacked vertical list of Priority items */}
+                    {/* Stacked vertical list of Priority items — sourced from
+                        dashboardSummary.todayOrders, which only carries
+                        orderNumber/status/totalPrice/balanceDue/deliveryDate.
+                        No cake name/photo/customer name/time here (the mock
+                        UI assumed those existed at this level; the real
+                        dashboard endpoint doesn't provide them — that detail
+                        only exists on the single order-details endpoint).
+                        Flagging this as a real UX reduction vs. the mock. */}
                     <div className="flex flex-col gap-4">
-                      {orders
-                        .filter(o => o.deliveryDate === '2023-10-24')
-                        .map((o) => {
-                          const isTruffle = o.cakeName.toLowerCase().includes('truffle');
-                          const isForest = o.cakeName.toLowerCase().includes('forest');
-                          const imgUrl = isTruffle
-                            ? 'https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=200&fit=crop&q=80'
-                            : isForest
-                              ? 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=200&fit=crop&q=80'
-                              : 'https://images.unsplash.com/photo-1588195538326-c5b1e9f8011b?w=200&fit=crop&q=80';
+                      {dashboardLoading && (
+                        <div className="flex flex-col gap-4">
+                          {[0, 1].map((i) => (
+                            <div key={i} className="h-20 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
+                          ))}
+                        </div>
+                      )}
 
-                          return (
-                            <div
-                              key={o.id}
-                              className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
-                              onClick={() => {
-                                setSelectedCustomer(customers.find(c => c.name === o.customerName) || null);
-                                setActiveSheet('customer-profile');
-                              }}
-                            >
-                              <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 flex-shrink-0 border border-[var(--border)]">
-                                <img src={imgUrl} alt={o.cakeName} className="w-full h-full object-cover" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.cakeName}</h4>
-                                <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
-                                  {o.customerName} • <span className="text-[var(--accent)] font-semibold">Due at {o.deliveryTime}</span>
-                                </p>
-                              </div>
-                              <div className="flex-shrink-0">
-                                {o.advanceAmount > 0 ? (
-                                  <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
-                                    ₹{o.advanceAmount} Paid
-                                  </span>
-                                ) : (
-                                  <span className="bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-[var(--border)]">
-                                    No Advance
-                                  </span>
-                                )}
-                              </div>
+                      {!dashboardLoading && !dashboardError && dashboardSummary?.todayOrders.length === 0 && (
+                        <p className="text-xs text-[var(--text-secondary)] text-center py-8">No deliveries scheduled for today.</p>
+                      )}
+
+                      {!dashboardLoading &&
+                        dashboardSummary?.todayOrders.map((o) => (
+                          <div
+                            key={o.id}
+                            className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                            onClick={() => openOrderDetail(o.orderNumber)}
+                          >
+                            <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
+                              🎂
                             </div>
-                          );
-                        })}
+                            <div className="flex-1 min-w-0">
+                              <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.orderNumber}</h4>
+                              <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                                <span className="text-[var(--accent)] font-semibold">{o.status}</span> • ₹{o.totalPrice.toLocaleString('en-IN')}
+                              </p>
+                            </div>
+                            <div className="flex-shrink-0">
+                              {o.balanceDue > 0 ? (
+                                <span className="bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-[var(--border)]">
+                                  ₹{o.balanceDue.toLocaleString('en-IN')} Due
+                                </span>
+                              ) : (
+                                <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
+                                  Fully Paid
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
                     </div>
                   </div>
+
+                  {/* Upcoming Lookahead — rest of this month's orders, or
+                      the nearest future month with orders if none remain
+                      this month (see backend getDashboardSummary). Hidden
+                      entirely when there's genuinely no upcoming order at
+                      all, rather than rendering an empty section. */}
+                  {!dashboardLoading && !dashboardError && dashboardSummary?.upcomingOrders && dashboardSummary.upcomingOrders.orders.length > 0 && (
+                    <div className="w-full mt-8">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="font-serif text-xl font-bold">
+                          {dashboardSummary.upcomingOrders.month === calendarMonth
+                            ? 'Upcoming This Month'
+                            : `Upcoming — ${new Date(`${dashboardSummary.upcomingOrders.month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`}
+                        </h3>
+                        <span
+                          onClick={() => setActiveTab('calendar')}
+                          className="text-xs font-semibold text-[var(--accent)] cursor-pointer flex items-center gap-0.5 hover:underline"
+                        >
+                          View calendar <ChevronRight size={14} />
+                        </span>
+                      </div>
+
+                      <div className="flex flex-col gap-4">
+                        {dashboardSummary.upcomingOrders.orders.map((o) => (
+                          <div
+                            key={o.id}
+                            className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                            onClick={() => openOrderDetail(o.orderNumber)}
+                          >
+                            <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
+                              🎂
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName} — {o.cakeCategory}</h4>
+                              <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                                {new Date(`${o.deliveryDate}T00:00:00`).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+                                {o.deliveryTime ? ` • ${o.deliveryTime}` : ''} • <span className="text-[var(--accent)] font-semibold">{o.status}</span>
+                              </p>
+                            </div>
+                            <div className="flex-shrink-0">
+                              {o.balanceDue > 0 ? (
+                                <span className="bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-[var(--border)]">
+                                  ₹{o.balanceDue.toLocaleString('en-IN')} Due
+                                </span>
+                              ) : (
+                                <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
+                                  Fully Paid
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Floating Action Button (FAB) */}
                   <button
@@ -675,13 +1458,13 @@ export default function Webapp() {
 
                     {/* Horizontal Scrollable Tabs */}
                     <div className="flex gap-2 overflow-x-auto no-scrollbar py-1">
-                      {['All', 'In Production', 'Ready', 'Delivered', 'Cancelled'].map((tabName) => (
+                      {orderTabs.map((tabName) => (
                         <button
                           key={tabName}
-                          onClick={() => setOrderTab(tabName as any)}
+                          onClick={() => setOrderTab(tabName)}
                           className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${orderTab === tabName
                             ? 'bg-[var(--accent)] text-white shadow-sm'
-                            : 'bg-[var(--surface)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50'
+                            : 'bg-[var(--surface)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900'
                             }`}
                         >
                           {tabName}
@@ -691,57 +1474,93 @@ export default function Webapp() {
 
                   </div>
 
-                  {/* Stacked vertical list of order cards */}
+                  {/* Real orders list (GET /api/orders) */}
+                  {ordersError && (
+                    <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3 mb-4">
+                      <span className="flex items-center gap-2"><AlertCircle size={14} /> {ordersError}</span>
+                      <button onClick={() => setOrdersPage((p) => p)} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                    </div>
+                  )}
+
                   <div className="flex flex-col gap-4">
-                    {orders
-                      .filter(o => {
-                        const matchesSearch = o.cakeName.toLowerCase().includes(orderSearch.toLowerCase()) ||
-                          o.customerName.toLowerCase().includes(orderSearch.toLowerCase()) ||
-                          o.id.toLowerCase().includes(orderSearch.toLowerCase());
-                        const matchesTab = orderTab === 'All' || o.status === orderTab;
-                        return matchesSearch && matchesTab;
-                      })
-                      .map((o) => (
+                    {ordersLoading &&
+                      [0, 1, 2].map((i) => (
+                        <div key={i} className="h-[170px] bg-[var(--text-primary)]/8 rounded-[24px] animate-pulse" />
+                      ))}
+
+                    {!ordersLoading && !ordersError && ordersList.length === 0 && (
+                      <p className="text-xs text-[var(--text-secondary)] text-center py-12">No orders match this filter.</p>
+                    )}
+
+                    {!ordersLoading &&
+                      ordersList.map((o) => (
                         <div
-                          key={o.id}
-                          onClick={() => {
-                            setSelectedCustomer(customers.find(c => c.name === o.customerName) || null);
-                            setActiveSheet('customer-profile');
-                          }}
+                          key={o.orderId}
+                          onClick={() => openOrderDetail(o.orderNumber)}
                           className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm hover:shadow-md transition-all cursor-pointer flex flex-col justify-between min-h-[170px] hover:border-[var(--accent)]/30"
                         >
                           <div>
                             <div className="flex justify-between items-start mb-3">
-                              <span className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">{o.id}</span>
+                              <span className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">{o.orderNumber}</span>
                               <div className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)] font-medium">
                                 <CalendarIcon size={12} />
-                                <span>Oct {o.deliveryDate.split('-')[2]}, {o.deliveryTime}</span>
+                                <span>{o.deliveryDate}</span>
                               </div>
                             </div>
 
-                            <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.cakeName}</h3>
-                            <p className="text-xs text-[var(--text-secondary)]">Customer: {o.customerName}</p>
+                            <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.customerName}</h3>
+                            <p className="text-xs text-[var(--text-secondary)]">{o.phone || 'No phone on file'}</p>
                           </div>
 
                           <div className="flex justify-between items-center pt-4 mt-4 border-t border-[var(--border)]/50">
-                            {/* Status Badge */}
-                            <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10.5px] font-bold ${o.status === 'In Production' ? 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50' :
-                              o.status === 'Ready' ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/50' :
-                                o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
-                                  'bg-red-50 text-red-600'
+                            <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10.5px] font-bold ${o.status === 'Pending' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border border-[var(--border)]' :
+                              o.status === 'Confirmed' ? 'bg-blue-50 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 border border-blue-200/50' :
+                                o.status === 'In Progress' ? 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50' :
+                                  o.status === 'Ready' ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/50' :
+                                    o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
+                                      'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400'
                               }`}>
                               <span className="w-1.5 h-1.5 bg-current rounded-full"></span>
                               {o.status}
                             </span>
 
-                            <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10.5px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100 flex items-center gap-1">
-                              <CheckCircle2 size={12} />
-                              ₹{o.advanceAmount} Advance
-                            </span>
+                            {o.balanceDue > 0 ? (
+                              <span className="bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 text-[10.5px] font-bold px-2.5 py-1.5 rounded-full border border-[var(--border)] flex items-center gap-1">
+                                ₹{o.balanceDue.toLocaleString('en-IN')} Due
+                              </span>
+                            ) : (
+                              <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10.5px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100 flex items-center gap-1">
+                                <CheckCircle2 size={12} />
+                                Fully Paid
+                              </span>
+                            )}
                           </div>
                         </div>
                       ))}
                   </div>
+
+                  {/* Pagination — added since real data isn't bounded like the mock array was */}
+                  {ordersPagination && ordersPagination.totalPages > 1 && (
+                    <div className="flex items-center justify-between mt-6">
+                      <button
+                        disabled={!ordersPagination.hasPrevious}
+                        onClick={() => setOrdersPage((p) => Math.max(1, p - 1))}
+                        className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        Previous
+                      </button>
+                      <span className="text-xs text-[var(--text-secondary)]">
+                        Page {ordersPagination.page} of {ordersPagination.totalPages} ({ordersPagination.totalItems} orders)
+                      </span>
+                      <button
+                        disabled={!ordersPagination.hasNext}
+                        onClick={() => setOrdersPage((p) => p + 1)}
+                        className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
 
                 </div>
               )}
@@ -753,14 +1572,15 @@ export default function Webapp() {
                   {/* Header Title */}
                   <div className="mb-6 flex justify-between items-center">
                     <h2 className="font-serif text-3xl md:text-4xl font-bold text-[var(--text-primary)]">Customers</h2>
+                    {/* There is no POST /api/customers endpoint — customers are only
+                        ever created implicitly via order creation (upsert-by-phone).
+                        "Add Customer" now routes to New Order, the real way this
+                        happens, instead of opening a form with nowhere to submit. */}
                     <button
-                      onClick={() => {
-                        setSelectedCustomer(null);
-                        setActiveSheet('customer-profile');
-                      }}
+                      onClick={() => setActiveSheet('new-order')}
                       className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-5 py-2.5 rounded-2xl text-xs font-bold shadow-md active:scale-95 transition-all flex items-center gap-2 cursor-pointer"
                     >
-                      <Plus size={16} strokeWidth={2.5} /> Add Customer
+                      <Plus size={16} strokeWidth={2.5} /> New Order
                     </button>
                   </div>
 
@@ -785,24 +1605,36 @@ export default function Webapp() {
                           {customerSort} <ChevronDown size={12} />
                         </button>
                       </div>
-                      <span className="text-[11px] text-[var(--text-secondary)] font-semibold">Total Clients: {customers.length}</span>
+                      <span className="text-[11px] text-[var(--text-secondary)] font-semibold">Total Clients: {customersPagination?.totalItems ?? 0}</span>
                     </div>
                   </div>
 
+                  {customersError && (
+                    <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3 mb-4">
+                      <span className="flex items-center gap-2"><AlertCircle size={14} /> {customersError}</span>
+                      <button onClick={() => setCustomersPage((p) => p)} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                    </div>
+                  )}
+
                   {/* Stacked vertical list of customer cards */}
                   <div className="flex flex-col gap-4">
-                    {customers
-                      .filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch))
-                      .map((c) => {
-                        const colors = ['bg-amber-100 text-amber-800 border-amber-200', 'bg-orange-100 text-orange-800 border-orange-200', 'bg-orange-100 text-orange-800 border-orange-200', 'bg-neutral-100 text-neutral-800 border-neutral-200'];
+                    {customersLoading &&
+                      [0, 1, 2].map((i) => (
+                        <div key={i} className="h-[150px] bg-[var(--text-primary)]/8 rounded-[24px] animate-pulse" />
+                      ))}
+
+                    {!customersLoading && !customersError && customersList.length === 0 && (
+                      <p className="text-xs text-[var(--text-secondary)] text-center py-12">No customers match this search.</p>
+                    )}
+
+                    {!customersLoading &&
+                      customersList.map((c) => {
+                        const colors = ['bg-amber-100 dark:bg-amber-950/30 text-amber-800 dark:text-amber-400 border-amber-200 dark:border-amber-900', 'bg-orange-100 dark:bg-orange-950/30 text-orange-800 dark:text-orange-400 border-orange-200 dark:border-orange-900', 'bg-orange-100 dark:bg-orange-950/30 text-orange-800 dark:text-orange-400 border-orange-200 dark:border-orange-900', 'bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-300 border-neutral-200 dark:border-neutral-700'];
                         const initial = c.name.charAt(0);
                         return (
                           <div
-                            key={c.phone}
-                            onClick={() => {
-                              setSelectedCustomer(c);
-                              setActiveSheet('customer-profile');
-                            }}
+                            key={c.customerId}
+                            onClick={() => openCustomerProfile(c.customerId)}
                             className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm hover:shadow-md transition-all cursor-pointer flex flex-col justify-between min-h-[150px] hover:border-[var(--accent)]/30"
                           >
                             <div className="flex items-start justify-between">
@@ -811,44 +1643,65 @@ export default function Webapp() {
                                   {initial}
                                 </div>
                                 <div>
+                                  {/* No VIP/Repeat "tag" field exists on the real customer
+                                      record — the mock's tag was purely fabricated, dropped. */}
                                   <h3 className="font-bold text-sm md:text-base text-[var(--text-primary)] flex items-center gap-1.5 leading-snug">
                                     {c.name}
-                                    {c.tag && (
-                                      <span className="bg-[#EA580C]/10 text-[#EA580C] text-[9px] font-extrabold px-2 py-0.5 rounded-full border border-[#EA580C]/20">
-                                        {c.tag}
-                                      </span>
-                                    )}
                                   </h3>
                                   <p className="text-[11.5px] text-[var(--text-secondary)] flex items-center gap-1 mt-1">
                                     <Phone size={11} />
-                                    {c.phone}
+                                    {c.phone || 'No phone on file'}
                                   </p>
                                 </div>
                               </div>
 
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  window.open(`https://wa.me/${c.phone.replace(/\D/g, '')}`, '_blank');
-                                }}
-                                className="w-10 h-10 rounded-full bg-emerald-50 hover:bg-emerald-100 text-emerald-600 flex items-center justify-center border border-emerald-100 transition-colors"
-                              >
-                                <MessageSquare size={16} />
-                              </button>
+                              {c.phone && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    window.open(`https://wa.me/${c.phone!.replace(/\D/g, '')}`, '_blank');
+                                  }}
+                                  className="w-10 h-10 rounded-full bg-emerald-50 dark:bg-emerald-950/20 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 flex items-center justify-center border border-emerald-100 dark:border-emerald-900 transition-colors"
+                                >
+                                  <MessageSquare size={16} />
+                                </button>
+                              )}
                             </div>
 
                             <div className="flex justify-between items-center mt-5 pt-3.5 border-t border-[var(--border)]/50 text-[11px] text-[var(--text-secondary)] font-medium">
                               <div>
-                                <span>Orders: <span className="font-bold text-[var(--text-primary)]">{c.ordersCount}</span></span>
+                                <span>Orders: <span className="font-bold text-[var(--text-primary)]">{c.totalOrders}</span></span>
                                 <span className="mx-2">•</span>
-                                <span>Last: <span className="font-bold text-[var(--text-primary)]">{c.lastOrderDate}</span></span>
+                                <span>Last: <span className="font-bold text-[var(--text-primary)]">{c.lastOrderDate || '—'}</span></span>
                               </div>
-                              <span className="font-extrabold text-[var(--text-primary)] text-xs">LTV: ₹{c.ltv.toLocaleString('en-IN')}</span>
+                              <span className="font-extrabold text-[var(--text-primary)] text-xs">LTV: ₹{c.lifetimeValue.toLocaleString('en-IN')}</span>
                             </div>
                           </div>
                         );
                       })}
                   </div>
+
+                  {customersPagination && customersPagination.totalPages > 1 && (
+                    <div className="flex items-center justify-between mt-6">
+                      <button
+                        disabled={!customersPagination.hasPrevious}
+                        onClick={() => setCustomersPage((p) => Math.max(1, p - 1))}
+                        className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        Previous
+                      </button>
+                      <span className="text-xs text-[var(--text-secondary)]">
+                        Page {customersPagination.page} of {customersPagination.totalPages} ({customersPagination.totalItems} customers)
+                      </span>
+                      <button
+                        disabled={!customersPagination.hasNext}
+                        onClick={() => setCustomersPage((p) => p + 1)}
+                        className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
 
                 </div>
               )}
@@ -861,76 +1714,73 @@ export default function Webapp() {
                   <div className="mb-6 flex justify-between items-center">
                     <h2 className="font-serif text-3xl md:text-4xl font-bold text-[var(--text-primary)]">Schedule</h2>
                     <span
-                      onClick={() => setSelectedDate('24')}
+                      onClick={() => {
+                        const t = new Date();
+                        const todayStr = t.toISOString().slice(0, 10);
+                        setCalendarMonth(`${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}`);
+                        setSelectedCalendarDate(todayStr);
+                        // Only scrolls if today's group is already rendered
+                        // (i.e. we were already viewing this month) — a
+                        // month switch triggers a refetch and the list
+                        // naturally lands at the top.
+                        dateGroupRefs.current[todayStr]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                      }}
                       className="text-xs font-bold text-[var(--accent)] hover:underline cursor-pointer bg-[var(--surface)] py-1.5 px-3.5 rounded-full border border-[var(--border)] shadow-sm"
                     >
                       Today
                     </span>
                   </div>
 
+                  {calendarError && (
+                    <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2 mb-4">
+                      <AlertCircle size={14} /> {calendarError}
+                    </div>
+                  )}
+
                   {/* Calendar Layout: stacked vertically for mobile view */}
                   <div className="flex flex-col gap-6 w-full">
 
-                    {/* Custom high-fidelity Calendar Component */}
+                    {/* Custom high-fidelity Calendar Component — real GET
+                        /api/dashboard/calendar. Cells show per-day order
+                        counts/status, not customer names (that endpoint
+                        doesn't return per-order detail — only Orders-list
+                        style endpoints do, which is what the day's
+                        delivery list below uses). */}
                     <div className="bg-[var(--surface)] rounded-[28px] border border-[var(--border)] p-5 shadow-sm w-full flex flex-col items-center">
-                      
+
                       {/* Month Swapping Header */}
                       <div className="w-full flex flex-col items-center mb-6">
                         <div className="w-full flex items-center justify-between px-1 mb-2">
-                          <button 
+                          <button
                             onClick={handlePrevMonth}
-                            className="p-2 rounded-[16px] bg-[var(--background)] hover:bg-neutral-100 text-[var(--text-primary)] transition-all border border-[var(--border)] cursor-pointer"
+                            className="p-2 rounded-[16px] bg-[var(--background)] hover:bg-neutral-100 dark:hover:bg-neutral-900 text-[var(--text-primary)] transition-all border border-[var(--border)] cursor-pointer"
                           >
                             <ArrowLeft size={16} />
                           </button>
-                          
+
                           <span className="text-base font-extrabold text-[var(--text-primary)] font-serif">
-                            {monthData[activeMonthTab]?.label || activeMonthTab}
+                            {calendarMonthLabel}
                           </span>
-                          
-                          <button 
+
+                          <button
                             onClick={handleNextMonth}
                             className="p-2 rounded-[16px] bg-[var(--background)] hover:bg-neutral-100 text-[var(--text-primary)] transition-all border border-[var(--border)] cursor-pointer rotate-180"
                           >
                             <ArrowLeft size={16} />
                           </button>
                         </div>
-                        
-                        <div className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
-                          Delivered: <span className="text-emerald-600 dark:text-emerald-400 font-bold">{monthData[activeMonthTab]?.delivered || '₹0'}</span>
-                          <span className="mx-2">•</span>
-                          Est. Total: <span className="text-amber-800 dark:text-amber-500 font-bold">{monthData[activeMonthTab]?.estTotal || '₹0'}</span>
-                        </div>
-                      </div>
 
-                      {/* Month Selector Horizontal Scrollbar */}
-                      <div className="flex gap-2.5 overflow-x-auto no-scrollbar pb-3 mb-6 w-full border-b border-[var(--border)]/50">
-                        {monthsList.map((mTab) => {
-                          const data = monthData[mTab];
-                          const isActive = activeMonthTab === mTab;
-                          return (
-                            <div
-                              key={mTab}
-                              onClick={() => {
-                                setActiveMonthTab(mTab);
-                                // Default select 24 for July, or 1 for other months
-                                setSelectedDate(mTab === 'Jul 26' ? '24' : '1');
-                              }}
-                              className={`min-w-[84px] h-[54px] rounded-[18px] flex flex-col items-center justify-center border text-center transition-all cursor-pointer select-none ${
-                                isActive
-                                  ? 'bg-[#2D1F17] dark:bg-neutral-800 border-[#2D1F17] dark:border-neutral-700 text-white'
-                                  : 'bg-[var(--surface)] border-[var(--border)] text-[var(--text-secondary)] hover:bg-neutral-50'
-                              }`}
-                            >
-                              <span className={`text-[11px] font-bold ${isActive ? 'text-white' : 'text-[var(--text-primary)]'}`}>
-                                {mTab}
-                              </span>
-                              <span className={`text-[9px] font-semibold mt-0.5 ${isActive ? 'text-neutral-300' : 'text-[var(--text-secondary)]'}`}>
-                                {data?.orders} {data?.orders === 1 ? 'order' : 'orders'}
-                              </span>
-                            </div>
-                          );
-                        })}
+                        <div className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
+                          {calendarLoading ? (
+                            <span>Loading…</span>
+                          ) : (
+                            <>
+                              Orders this month: <span className="text-emerald-600 dark:text-emerald-400 font-bold">{calendarMonthTotals.totalOrders}</span>
+                              <span className="mx-2">•</span>
+                              Outstanding: <span className="text-amber-800 dark:text-amber-500 font-bold">₹{calendarMonthTotals.outstandingBalance.toLocaleString('en-IN')}</span>
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       {/* Weekdays Headers */}
@@ -941,80 +1791,44 @@ export default function Webapp() {
                       {/* Days Grid */}
                       <div className="grid grid-cols-7 gap-y-3 gap-x-1.5 w-full">
                         {/* Render offsets */}
-                        {Array.from({ length: monthData[activeMonthTab]?.startOffset || 0 }).map((_, idx) => (
+                        {Array.from({ length: calendarStartOffset }).map((_, idx) => (
                           <div key={`offset-${idx}`} className="py-2.5"></div>
                         ))}
-                        
+
                         {/* Render actual days */}
-                        {Array.from({ length: monthData[activeMonthTab]?.totalDays || 30 }).map((_, d) => {
+                        {Array.from({ length: calendarDaysInMonth }).map((_, d) => {
                           const dayInt = d + 1;
-                          const dayNum = dayInt.toString();
-                          const isSelected = selectedDate === dayNum;
-                          const isToday = activeMonthTab === 'Jul 26' && dayNum === '24';
-                          
-                          const deliveries = calendarDeliveries[activeMonthTab]?.[dayInt];
-                          const hasDeliveries = !!deliveries;
-
-                          if (hasDeliveries) {
-                            const first = deliveries[0];
-                            let bgClass = '';
-                            if (first.type === 'green') bgClass = 'bg-[#E6F4EA] text-[#137333] border border-[#CEEAD6]';
-                            else if (first.type === 'yellow') bgClass = 'bg-[#FEF7E0] text-[#B06000] border border-[#FEEFC3]';
-                            else if (first.type === 'blue') bgClass = 'bg-[#E8F0FE] text-[#1A73E8] border border-[#D2E3FC]';
-
-                            return (
-                              <div
-                                key={d}
-                                onClick={() => setSelectedDate(dayNum)}
-                                className={`bg-[var(--surface)] rounded-[18px] border p-1.5 flex flex-col items-center min-h-[92px] justify-between cursor-pointer hover:border-[var(--accent)] transition-all shadow-sm w-full ${
-                                  isSelected 
-                                    ? 'border-[#2D1F17] dark:border-neutral-300 ring-1 ring-[#2D1F17] dark:ring-neutral-300' 
-                                    : 'border-[var(--border)]'
-                                }`}
-                              >
-                                {isToday ? (
-                                  <span className="w-5 h-5 rounded-full bg-[var(--accent)] text-white flex items-center justify-center text-[10px] font-extrabold shadow-sm">
-                                    {dayNum}
-                                  </span>
-                                ) : (
-                                  <span className="text-xs font-extrabold text-[var(--text-primary)]">
-                                    {dayNum}
-                                  </span>
-                                )}
-                                
-                                <div className={`w-full rounded-xl py-1 px-1 text-center text-[8.5px] leading-tight font-extrabold ${bgClass} mt-1 truncate`}>
-                                  <div className="truncate">{first.customer}</div>
-                                  <div className="text-[7px] opacity-80 truncate mt-0.5 font-normal leading-none">{first.cake}</div>
-                                </div>
-                                
-                                {first.moreCount ? (
-                                  <span className="text-[8.5px] font-extrabold text-amber-800 dark:text-amber-500 mt-0.5">
-                                    +{first.moreCount} more
-                                  </span>
-                                ) : (
-                                  <div className="h-2"></div>
-                                )}
-                              </div>
-                            );
-                          }
+                          const dateStr = `${calendarMonth}-${String(dayInt).padStart(2, '0')}`;
+                          const isSelected = selectedCalendarDate === dateStr;
+                          const isToday = dateStr === new Date().toISOString().slice(0, 10);
+                          const dayData = calendarData?.days.find((dd) => dd.date === dateStr);
+                          const hasOrders = !!dayData && dayData.totalOrders > 0;
 
                           return (
                             <div
                               key={d}
-                              onClick={() => setSelectedDate(dayNum)}
-                              className="flex flex-col items-center justify-start py-2 relative cursor-pointer w-full min-h-[92px]"
+                              onClick={() => {
+                                setSelectedCalendarDate(dateStr);
+                                dateGroupRefs.current[dateStr]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                              }}
+                              className={`rounded-[18px] border p-1.5 flex flex-col items-center min-h-[72px] justify-center gap-1 cursor-pointer transition-all shadow-sm w-full ${
+                                isSelected
+                                  ? 'border-[var(--text-primary)] ring-1 ring-[var(--text-primary)] bg-[var(--surface)]'
+                                  : hasOrders
+                                    ? 'bg-[#E6F4EA] dark:bg-emerald-950/20 border-[#CEEAD6] dark:border-emerald-900 hover:border-[var(--accent)]'
+                                    : 'bg-transparent border-transparent hover:border-[var(--border)]'
+                              }`}
                             >
                               {isToday ? (
-                                <span className="w-6 h-6 rounded-full bg-[var(--accent)] text-white flex items-center justify-center text-xs font-extrabold shadow-sm">
-                                  {dayNum}
+                                <span className="w-5 h-5 rounded-full bg-[var(--accent)] text-white flex items-center justify-center text-[10px] font-extrabold shadow-sm">
+                                  {dayInt}
                                 </span>
                               ) : (
-                                <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
-                                  isSelected 
-                                    ? 'bg-[#2D1F17] dark:bg-neutral-800 text-white' 
-                                    : 'text-[var(--text-secondary)]/70 hover:bg-neutral-100 dark:hover:bg-neutral-900'
-                                }`}>
-                                  {dayNum}
+                                <span className="text-xs font-extrabold text-[var(--text-primary)]">{dayInt}</span>
+                              )}
+                              {hasOrders && (
+                                <span className="text-[8.5px] font-extrabold text-[#137333] dark:text-emerald-400">
+                                  {dayData!.totalOrders} {dayData!.totalOrders === 1 ? 'order' : 'orders'}
                                 </span>
                               )}
                             </div>
@@ -1029,55 +1843,92 @@ export default function Webapp() {
                           <span>Today</span>
                         </div>
                         <div className="flex items-center gap-1.5">
-                          <span className="w-3 h-3 rounded-full bg-[var(--surface)] border border-[var(--border)]"></span>
-                          <span>Has deliveries</span>
+                          <span className="w-3 h-3 rounded-full bg-[#E6F4EA] border border-[#CEEAD6]"></span>
+                          <span>Has orders</span>
                         </div>
                         <div className="flex items-center gap-1.5">
-                          <span className="w-3 h-3 rounded-full bg-[#2D1F17] dark:bg-neutral-800"></span>
+                          <span className="w-3 h-3 rounded-full bg-[var(--text-primary)]"></span>
                           <span>Selected</span>
                         </div>
                       </div>
 
                     </div>
 
-                    {/* Right Column (List of deliveries for selected date) */}
-                    <div className="flex flex-col gap-3.5">
-                      <h3 className="font-serif text-lg font-bold">Deliveries for {activeMonthTab.split(' ')[0]} {selectedDate}</h3>
+                    {/* Right Column — whole month's orders, grouped by
+                        date. Calendar day-cell clicks (above) scroll to
+                        the matching group via dateGroupRefs rather than
+                        re-fetching/re-filtering a single-date list. */}
+                    <div className="flex flex-col gap-5">
+                      <h3 className="font-serif text-lg font-bold">Deliveries this month</h3>
 
-                      {orders
-                        .filter(o => o.deliveryDate.endsWith(`-${selectedDate.padStart(2, '0')}`))
-                        .map((o) => (
-                          <div
-                            key={o.id}
-                            className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex items-center justify-between hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
-                            onClick={() => {
-                              setSelectedCustomer(customers.find(c => c.name === o.customerName) || null);
-                              setActiveSheet('customer-profile');
-                            }}
-                          >
-                            <div className="flex items-center gap-4">
-                              <span className="text-xs font-bold text-[var(--accent)]">{o.deliveryTime}</span>
-                              <div>
-                                <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.cakeName}</h4>
-                                <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Customer: {o.customerName}</p>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                              <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-100">
-                                Paid
-                              </span>
-                              <ChevronRight size={14} className="text-[var(--text-secondary)]" />
-                            </div>
-                          </div>
-                        ))}
-
-                      {orders.filter(o => o.deliveryDate.endsWith(`-${selectedDate.padStart(2, '0')}`)).length === 0 && (
-                        <div className="text-center py-12 bg-[var(--surface)] rounded-[22px] border border-dashed border-[var(--border)]">
-                          <span className="text-2xl">🥣</span>
-                          <p className="text-xs text-[var(--text-secondary)] mt-2">No deliveries scheduled for this day.</p>
+                      {calendarMonthOrdersError && (
+                        <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2">
+                          <AlertCircle size={14} /> {calendarMonthOrdersError}
                         </div>
                       )}
+
+                      {calendarMonthOrdersLoading &&
+                        [0, 1, 2].map((i) => (
+                          <div key={i} className="h-20 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
+                        ))}
+
+                      {!calendarMonthOrdersLoading && !calendarMonthOrdersError && calendarMonthOrders.length === 0 && (
+                        <div className="text-center py-12 bg-[var(--surface)] rounded-[22px] border border-dashed border-[var(--border)]">
+                          <span className="text-2xl">🥣</span>
+                          <p className="text-xs text-[var(--text-secondary)] mt-2">No deliveries scheduled this month.</p>
+                        </div>
+                      )}
+
+                      {!calendarMonthOrdersLoading &&
+                        (() => {
+                          const ordersByDate: Record<string, RealOrderListItem[]> = {};
+                          for (const o of calendarMonthOrders) {
+                            (ordersByDate[o.deliveryDate] ||= []).push(o);
+                          }
+                          const sortedDates = Object.keys(ordersByDate).sort();
+
+                          return sortedDates.map((dateKey) => {
+                            const isSelectedGroup = selectedCalendarDate === dateKey;
+                            const dateLabel = new Date(`${dateKey}T00:00:00`).toLocaleDateString('en-US', {
+                              weekday: 'short',
+                              day: 'numeric',
+                              month: 'short',
+                            });
+                            return (
+                              <div
+                                key={dateKey}
+                                ref={(el) => { dateGroupRefs.current[dateKey] = el; }}
+                                className="flex flex-col gap-3"
+                              >
+                                <h4 className={`text-xs font-bold uppercase tracking-wider ${isSelectedGroup ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`}>
+                                  {dateLabel}
+                                </h4>
+                                {ordersByDate[dateKey].map((o) => (
+                                  <div
+                                    key={o.orderId}
+                                    className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex items-center justify-between hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                                    onClick={() => openOrderDetail(o.orderNumber)}
+                                  >
+                                    <div className="flex items-center gap-4">
+                                      <span className="text-xs font-bold text-[var(--accent)]">{o.orderNumber}</span>
+                                      <div>
+                                        <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName}</h4>
+                                        <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{o.status} • ₹{o.totalPrice.toLocaleString('en-IN')}</p>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-2">
+                                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${o.balanceDue > 0 ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]' : 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100'}`}>
+                                        {o.balanceDue > 0 ? `₹${o.balanceDue.toLocaleString('en-IN')} Due` : 'Paid'}
+                                      </span>
+                                      <ChevronRight size={14} className="text-[var(--text-secondary)]" />
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          });
+                        })()}
                     </div>
 
                   </div>
@@ -1094,7 +1945,7 @@ export default function Webapp() {
                     <h2 className="font-serif text-3xl md:text-4xl font-bold text-[var(--text-primary)]">Supply Hub</h2>
                     <button className="relative w-11 h-11 rounded-full border border-[var(--border)] bg-[var(--surface)] flex items-center justify-center cursor-pointer shadow-sm">
                       <ShoppingBag size={18} />
-                      <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#EA580C] text-white text-[9px] font-extrabold rounded-full flex items-center justify-center border border-white">
+                      <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[var(--accent)] text-white text-[9px] font-extrabold rounded-full flex items-center justify-center border border-[var(--surface)]">
                         {cartCount}
                       </span>
                     </button>
@@ -1120,7 +1971,7 @@ export default function Webapp() {
                           onClick={() => setSupplyTab(tabName)}
                           className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${supplyTab === tabName
                             ? 'bg-[var(--accent)] text-white shadow-sm'
-                            : 'bg-[var(--surface)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50'
+                            : 'bg-[var(--surface)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900'
                             }`}
                         >
                           {tabName}
@@ -1135,7 +1986,7 @@ export default function Webapp() {
                     {/* Verified Partner Banner */}
                     <div className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm flex flex-col justify-between overflow-hidden relative min-h-[220px]">
                       <div>
-                        <span className="text-[9.5px] font-extrabold text-[#EA580C] bg-[#EA580C]/10 border border-[#EA580C]/20 px-3 py-1 rounded-full uppercase tracking-wider">
+                        <span className="text-[9.5px] font-extrabold text-[var(--accent)] bg-[var(--accent)]/10 border border-[var(--accent)]/20 px-3 py-1 rounded-full uppercase tracking-wider">
                           Verified Local Partner
                         </span>
                         <h3 className="font-serif font-bold text-xl text-[var(--text-primary)] mt-3">Gupta Wholesale Mart</h3>
@@ -1143,7 +1994,7 @@ export default function Webapp() {
                       </div>
 
                       <div className="flex items-center justify-between mt-4">
-                        <div className="inline-flex items-center gap-1 bg-amber-50 dark:bg-amber-950/20 text-[#EA580C] text-[10px] font-bold px-2.5 py-1 rounded-full border border-amber-200/50">
+                        <div className="inline-flex items-center gap-1 bg-amber-50 dark:bg-amber-950/20 text-[var(--accent)] text-[10px] font-bold px-2.5 py-1 rounded-full border border-amber-200/50">
                           🚚 Flash Pickup
                         </div>
                         <span className="text-3xl">🏭</span>
@@ -1174,7 +2025,7 @@ export default function Webapp() {
 
                               <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-[var(--border)]/50">
                                 <span className="font-bold text-xs sm:text-sm">₹{p.price.toLocaleString('en-IN')}</span>
-                                <button className="text-[10px] font-bold text-[var(--accent)] hover:bg-orange-50 px-2.5 py-1 rounded-full border border-[var(--accent)]/30 hover:border-[var(--accent)] transition-all cursor-pointer">
+                                <button className="text-[10px] font-bold text-[var(--accent)] hover:bg-orange-50 dark:hover:bg-orange-950/20 px-2.5 py-1 rounded-full border border-[var(--accent)]/30 hover:border-[var(--accent)] transition-all cursor-pointer">
                                   View
                                 </button>
                               </div>
@@ -1198,16 +2049,25 @@ export default function Webapp() {
                   {/* Profile Overview Banner */}
                   <div className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm mb-6 flex items-center justify-between">
                     <div className="flex items-center gap-4">
-                      <div className="w-16 h-16 rounded-full overflow-hidden border border-[var(--border)]">
-                        <img
-                          src="https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=120&fit=crop&q=80"
-                          alt="Avatar"
-                          className="w-full h-full object-cover"
-                        />
+                      <div className="w-16 h-16 rounded-full overflow-hidden border border-[var(--border)] flex items-center justify-center bg-[var(--background)] text-xl font-bold text-[var(--text-secondary)]">
+                        {bakerProfile?.business.logoUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={bakerProfile.business.logoUrl}
+                            alt="Avatar"
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          (bakerProfile?.business.ownerName || bakerProfile?.business.businessName || '?').charAt(0)
+                        )}
                       </div>
                       <div>
-                        <h3 className="font-serif font-bold text-lg text-[var(--text-primary)]">{bakeryName}</h3>
-                        <p className="text-xs text-[var(--text-secondary)] mt-0.5">+91 {phoneNumber.replace(/(\d{5})(\d{5})/, '$1 $2')}</p>
+                        {bakerProfileLoading && !bakerProfile ? (
+                          <div className="h-5 w-32 bg-[var(--text-primary)]/8 rounded animate-pulse" />
+                        ) : (
+                          <h3 className="font-serif font-bold text-lg text-[var(--text-primary)]">{bakerProfile?.business.businessName || 'Unnamed Bakery'}</h3>
+                        )}
+                        <p className="text-xs text-[var(--text-secondary)] mt-0.5">{bakerProfile?.business.phone || ''}</p>
                       </div>
                     </div>
 
@@ -1215,30 +2075,38 @@ export default function Webapp() {
                       onClick={() => setActiveSheet('edit-profile')}
                       className="bg-[var(--background)] hover:bg-[var(--surface)] border border-[var(--border)] text-xs font-bold px-4 py-2 rounded-xl transition-all cursor-pointer text-[var(--accent)]"
                     >
-                      Edit Profile &gt;
+                      View Profile &gt;
                     </button>
                   </div>
+
+                  {bakerProfileError && (
+                    <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2 mb-6">
+                      <AlertCircle size={14} /> {bakerProfileError}
+                    </div>
+                  )}
 
                   {/* Settings Grid (Stacked for Mobile View) */}
                   <div className="flex flex-col gap-6">
 
-                    {/* Category 1: Business Operations */}
+                    {/* Category 1: Business Operations
+                        businessName/fssaiNumber/whatsappReceiptEnabled
+                        still have no write endpoint beyond UPI settings, so
+                        those stay read-only here. ownerName/phone/
+                        defaultAdvancePercentage are now editable — see the
+                        "Profile & Legal" sheet (PATCH /api/baker/profile). */}
                     <div className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] p-5 shadow-sm">
                       <h4 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-4 flex items-center gap-1.5">
                         🏪 Business Operations
                       </h4>
 
                       <div className="flex flex-col gap-1.5">
-                        <div
-                          onClick={() => setActiveSheet('edit-profile')}
-                          className="flex items-center justify-between py-2.5 border-b border-[var(--border)]/50 last:border-b-0 cursor-pointer group"
-                        >
+                        <div className="flex items-center justify-between py-2.5 border-b border-[var(--border)]/50 last:border-b-0">
                           <div className="flex items-center gap-2">
-                            <Percent size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
+                            <Percent size={15} className="text-[var(--text-secondary)]" />
                             <span className="text-xs font-medium text-[var(--text-primary)]">Default Advance Needed</span>
                           </div>
-                          <span className="text-xs font-bold text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] flex items-center gap-1">
-                            {defaultAdvance} <ChevronRight size={14} />
+                          <span className="text-xs font-bold text-[var(--text-secondary)]">
+                            {bakerProfile?.payment.defaultAdvancePercentage != null ? `${bakerProfile.payment.defaultAdvancePercentage}%` : 'Not set'}
                           </span>
                         </div>
 
@@ -1247,27 +2115,18 @@ export default function Webapp() {
                             <MessageSquare size={15} className="text-[var(--text-secondary)]" />
                             <span className="text-xs font-medium text-[var(--text-primary)]">Auto-Send Receipts</span>
                           </div>
-                          <label className="relative inline-flex items-center cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={autoSendReceipts}
-                              onChange={() => setAutoSendReceipts(!autoSendReceipts)}
-                              className="sr-only peer"
-                            />
-                            <div className="w-9 h-5 bg-neutral-200 peer-focus:outline-none rounded-full peer dark:bg-neutral-800 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-[var(--accent)]"></div>
-                          </label>
+                          <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${bakerProfile?.payment.whatsappReceiptEnabled ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100' : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]'}`}>
+                            {bakerProfile?.payment.whatsappReceiptEnabled ? 'On' : 'Off'} (read-only)
+                          </span>
                         </div>
 
-                        <div
-                          onClick={() => setActiveSheet('edit-profile')}
-                          className="flex items-center justify-between py-2.5 cursor-pointer group"
-                        >
+                        <div className="flex items-center justify-between py-2.5">
                           <div className="flex items-center gap-2">
-                            <ShieldCheck size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
+                            <ShieldCheck size={15} className="text-[var(--text-secondary)]" />
                             <span className="text-xs font-medium text-[var(--text-primary)]">FSSAI License</span>
                           </div>
-                          <span className="text-xs font-bold text-[var(--accent)] flex items-center gap-1">
-                            {fssaiLicense ? 'Verified' : 'Add Number'} <ChevronRight size={14} />
+                          <span className="text-xs font-bold text-[var(--text-secondary)]">
+                            {bakerProfile?.verification.fssaiNumber ? (bakerProfile.verification.fssaiVerified ? 'Verified' : 'Pending verification') : 'Not on file'}
                           </span>
                         </div>
                       </div>
@@ -1281,7 +2140,7 @@ export default function Webapp() {
 
                       <div className="flex flex-col gap-1.5">
                         <div
-                          onClick={() => setActiveSheet('subscription-autopay')}
+                          onClick={() => { setActiveSheet('subscription-autopay'); fetchBillingStatus(); }}
                           className="flex items-center justify-between py-2.5 border-b border-[var(--border)]/50 last:border-b-0 cursor-pointer group"
                         >
                           <div className="flex items-center gap-2">
@@ -1289,17 +2148,17 @@ export default function Webapp() {
                             <span className="text-xs font-medium text-[var(--text-primary)]">Subscription Plan</span>
                           </div>
                           <span className="text-xs font-bold text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] flex items-center gap-1">
-                            Early Adopter Pro <ChevronRight size={14} />
+                            {bakerProfile?.subscription.plan || bakerProfile?.subscription.status || '—'} <ChevronRight size={14} />
                           </span>
                         </div>
 
                         <div
-                          onClick={() => setActiveSheet('subscription-autopay')}
+                          onClick={() => setActiveSheet('manage-upi')}
                           className="flex items-center justify-between py-2.5 cursor-pointer group"
                         >
                           <div className="flex items-center gap-2">
                             <CreditCard size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
-                            <span className="text-xs font-medium text-[var(--text-primary)]">Manage UPI AutoPay</span>
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Manage UPI Collection</span>
                           </div>
                           <ChevronRight size={14} className="text-[var(--text-secondary)]" />
                         </div>
@@ -1341,8 +2200,11 @@ export default function Webapp() {
 
                   {/* Log out */}
                   <button
-                    onClick={() => setStep('login')}
-                    className="w-full py-4 text-xs font-bold text-red-600 bg-red-50 dark:bg-red-950/20 hover:bg-red-100 rounded-2xl flex items-center justify-center gap-2 border border-red-200/40 transition-colors mt-6 cursor-pointer"
+                    onClick={async () => {
+                      await logoutRequest();
+                      setStep('login');
+                    }}
+                    className="w-full py-4 text-xs font-bold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/20 hover:bg-red-100 dark:hover:bg-red-950/40 rounded-2xl flex items-center justify-center gap-2 border border-red-200/40 dark:border-red-900 transition-colors mt-6 cursor-pointer"
                   >
                     <LogOut size={14} />
                     Log Out
@@ -1358,18 +2220,19 @@ export default function Webapp() {
                   {/* Header Title */}
                   <div className="mb-6 flex justify-between items-center">
                     <h2 className="font-serif text-3xl md:text-4xl font-bold text-[var(--text-primary)]">Expenses</h2>
-                    <button className="text-xs font-bold text-[var(--accent)] hover:underline flex items-center gap-0.5 cursor-pointer">
-                      Download Report <ArrowUpRight size={14} />
-                    </button>
                   </div>
 
-                  {/* Monthly Aggregates banner */}
+                  {/* Monthly Aggregates banner — real GET /api/investments?from=<1st of month>&to=<today> */}
                   <div className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm mb-6 flex justify-between items-center max-w-xl">
                     <div>
                       <span className="text-xs text-[var(--text-secondary)] font-semibold">Spent this Month</span>
-                      <h3 className="font-serif text-3xl md:text-4xl font-extrabold mt-1 text-[var(--text-primary)]">
-                        ₹{totalCollectedThisMonth.toLocaleString('en-IN')}
-                      </h3>
+                      {monthlySpend === null ? (
+                        <div className="h-9 w-28 bg-[var(--text-primary)]/8 rounded-lg animate-pulse mt-1" />
+                      ) : (
+                        <h3 className="font-serif text-3xl md:text-4xl font-extrabold mt-1 text-[var(--text-primary)]">
+                          ₹{monthlySpend.toLocaleString('en-IN')}
+                        </h3>
+                      )}
                     </div>
                     <div className="w-14 h-14 bg-orange-50 dark:bg-[#1A0C06] rounded-full flex items-center justify-center text-orange-600 border border-orange-100 shadow-inner">
                       <Wallet size={24} />
@@ -1379,20 +2242,28 @@ export default function Webapp() {
                   {/* Grid Split: Form on left, recent logs on right */}
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
 
-                    {/* Log form (Left Column) */}
+                    {/* Log form (Left Column) — real fields: quantity x
+                        pricePerUnit (server computes totalCost), not a flat
+                        "amount"; real category vocab; purchaseDate required. */}
                     <form onSubmit={handleLogExpense} className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm">
                       <h4 className="font-serif font-bold text-base mb-4">Log New Expense</h4>
 
+                      {logExpenseError && (
+                        <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium mb-3 flex items-center gap-2">
+                          <AlertCircle size={13} /> {logExpenseError}
+                        </div>
+                      )}
+
                       <div className="flex flex-col gap-3.5">
                         <div>
-                          <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Item description</label>
+                          <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Material / item</label>
                           <div className="flex items-center border border-[var(--border)] rounded-xl bg-[var(--background)] px-3 focus-within:border-[var(--accent)] transition-colors">
                             <Info size={14} className="text-[var(--text-secondary)]" />
                             <input
                               type="text"
                               placeholder="e.g. Flour, Butter, Cocoa"
-                              value={expenseForm.item}
-                              onChange={(e) => setExpenseForm({ ...expenseForm, item: e.target.value })}
+                              value={expenseForm.materialName}
+                              onChange={(e) => setExpenseForm({ ...expenseForm, materialName: e.target.value })}
                               className="w-full py-2.5 px-2 text-xs outline-none bg-transparent"
                               required
                             />
@@ -1401,14 +2272,39 @@ export default function Webapp() {
 
                         <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Amount (₹)</label>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Quantity</label>
+                            <input
+                              type="number"
+                              placeholder="0"
+                              value={expenseForm.quantity}
+                              onChange={(e) => setExpenseForm({ ...expenseForm, quantity: e.target.value })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none font-bold"
+                              required
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Unit</label>
+                            <input
+                              type="text"
+                              placeholder="kg, litre, piece..."
+                              value={expenseForm.unit}
+                              onChange={(e) => setExpenseForm({ ...expenseForm, unit: e.target.value })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none"
+                              required
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Price / unit (₹)</label>
                             <div className="flex items-center border border-[var(--border)] rounded-xl bg-[var(--background)] px-3 focus-within:border-[var(--accent)] transition-colors">
                               <span className="text-[var(--text-secondary)] text-xs font-semibold">₹</span>
                               <input
                                 type="number"
                                 placeholder="0.00"
-                                value={expenseForm.amount}
-                                onChange={(e) => setExpenseForm({ ...expenseForm, amount: e.target.value })}
+                                value={expenseForm.pricePerUnit}
+                                onChange={(e) => setExpenseForm({ ...expenseForm, pricePerUnit: e.target.value })}
                                 className="w-full py-2.5 px-2 text-xs outline-none bg-transparent font-bold"
                                 required
                               />
@@ -1419,48 +2315,111 @@ export default function Webapp() {
                             <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Category</label>
                             <select
                               value={expenseForm.category}
-                              onChange={(e: any) => setExpenseForm({ ...expenseForm, category: e.target.value })}
+                              onChange={(e) => setExpenseForm({ ...expenseForm, category: e.target.value as RealInvestmentCategory })}
                               className="w-full bg-[var(--background)] border border-[var(--border)] text-xs rounded-xl py-3 px-3 outline-none"
                             >
-                              <option value="Raw Material">Raw Material</option>
-                              <option value="Packaging">Packaging</option>
-                              <option value="Decoration">Decoration</option>
-                              <option value="Equipment">Equipment</option>
+                              {expenseCategories.map((category) => (
+                                <option key={category} value={category}>{category}</option>
+                              ))}
                             </select>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Purchase date</label>
+                            <input
+                              type="date"
+                              value={expenseForm.purchaseDate}
+                              onChange={(e) => setExpenseForm({ ...expenseForm, purchaseDate: e.target.value })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none"
+                              required
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Supplier (optional)</label>
+                            <input
+                              type="text"
+                              placeholder="e.g. Amul distributor"
+                              value={expenseForm.supplierName}
+                              onChange={(e) => setExpenseForm({ ...expenseForm, supplierName: e.target.value })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none"
+                            />
                           </div>
                         </div>
 
                         <button
                           type="submit"
-                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-bold py-3.5 rounded-xl transition-all shadow-sm flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
+                          disabled={logExpenseSubmitting}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white text-xs font-bold py-3.5 rounded-xl transition-all shadow-sm flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
                         >
-                          <Plus size={16} strokeWidth={2.5} /> Log Purchase
+                          <Plus size={16} strokeWidth={2.5} /> {logExpenseSubmitting ? 'Logging...' : 'Log Purchase'}
                         </button>
                       </div>
                     </form>
 
-                    {/* Recent purchases log (Right Column) */}
+                    {/* Recent purchases log (Right Column) — real GET /api/investments */}
                     <div className="lg:col-span-2 flex flex-col gap-3.5">
                       <h3 className="font-serif text-lg font-bold">Recent Purchases</h3>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        {expenses.map((e) => (
-                          <div
-                            key={e.id}
-                            className="bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center"
-                          >
-                            <div>
-                              <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{e.date}</span>
-                              <h4 className="font-bold text-sm text-[var(--text-primary)] mt-1">{e.item}</h4>
-                              <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full mt-2 uppercase tracking-wide">
-                                {e.category}
-                              </span>
-                            </div>
+                      {investmentsError && (
+                        <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
+                          <span className="flex items-center gap-2"><AlertCircle size={14} /> {investmentsError}</span>
+                          <button onClick={() => setInvestmentsPage((p) => p)} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                        </div>
+                      )}
 
-                            <span className="font-extrabold text-base text-red-600">- ₹{e.amount}</span>
-                          </div>
-                        ))}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {investmentsLoading &&
+                          [0, 1, 2, 3].map((i) => (
+                            <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
+                          ))}
+
+                        {!investmentsLoading && !investmentsError && investmentsList.length === 0 && (
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-8 sm:col-span-2">No expenses logged yet.</p>
+                        )}
+
+                        {!investmentsLoading &&
+                          investmentsList.map((entry) => (
+                            <div
+                              key={entry.id}
+                              className="bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center"
+                            >
+                              <div>
+                                <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{entry.purchaseDate}</span>
+                                <h4 className="font-bold text-sm text-[var(--text-primary)] mt-1">{entry.materialName}</h4>
+                                <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{entry.quantity} {entry.unit} × ₹{entry.pricePerUnit}</p>
+                                <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full mt-2 uppercase tracking-wide">
+                                  {entry.category}
+                                </span>
+                              </div>
+
+                              <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
+                            </div>
+                          ))}
                       </div>
+
+                      {investmentsPagination && investmentsPagination.totalPages > 1 && (
+                        <div className="flex items-center justify-between mt-2">
+                          <button
+                            disabled={!investmentsPagination.hasPrevious}
+                            onClick={() => setInvestmentsPage((p) => Math.max(1, p - 1))}
+                            className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            Previous
+                          </button>
+                          <span className="text-xs text-[var(--text-secondary)]">
+                            Page {investmentsPagination.page} of {investmentsPagination.totalPages}
+                          </span>
+                          <button
+                            disabled={!investmentsPagination.hasNext}
+                            onClick={() => setInvestmentsPage((p) => p + 1)}
+                            className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                   </div>
@@ -1470,64 +2429,74 @@ export default function Webapp() {
 
             </main>
 
-            {/* --- MOBILE BOTTOM NAVIGATION TAB BAR --- */}
-            <div className="absolute bottom-0 left-0 right-0 z-40 bg-[var(--background)] border-t border-[var(--border)] px-6 py-2.5 flex justify-between items-center shadow-lg select-none">
+            {/* --- MOBILE BOTTOM NAVIGATION TAB BAR ---
+                6 tabs now that Expenses has its own always-visible slot
+                (see note below) — px-3.5 per-button + px-6 container
+                padding was sized for 5 tabs and overflowed the nav bar
+                horizontally below ~430px (buttons got clipped/hidden on
+                real phone widths). Padding is tightened on the smallest
+                screens and restored from sm: up. */}
+            <div className="absolute bottom-0 left-0 right-0 z-40 bg-[var(--background)] border-t border-[var(--border)] px-1 sm:px-6 py-2.5 flex justify-between items-center shadow-lg select-none">
 
               <button
                 onClick={() => setActiveTab('home')}
-                className={`flex flex-col items-center gap-1 px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'home' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'home' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                   }`}
               >
                 <HomeIcon size={18} />
-                <span className="text-[9px] uppercase tracking-wider font-semibold">Home</span>
+                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Home</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('orders')}
-                className={`flex flex-col items-center gap-1 px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'orders' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'orders' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                   }`}
               >
                 <ClipboardList size={18} />
-                <span className="text-[9px] uppercase tracking-wider font-semibold">Orders</span>
+                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Orders</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('customers')}
-                className={`flex flex-col items-center gap-1 px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'customers' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'customers' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                   }`}
               >
                 <Users size={18} />
-                <span className="text-[9px] uppercase tracking-wider font-semibold">Customers</span>
+                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Customers</span>
               </button>
 
-              {/* Dynamic tab logic */}
-              {activeTab === 'calendar' || activeTab === 'supply' || activeTab === 'expenses' ? (
-                <button
-                  onClick={() => setActiveTab(activeTab === 'calendar' ? 'calendar' : activeTab === 'supply' ? 'supply' : 'expenses')}
-                  className="flex flex-col items-center gap-1 px-3.5 py-1 rounded-full text-[var(--accent)] font-bold scale-105 transition-all cursor-pointer"
-                >
-                  {activeTab === 'calendar' ? <CalendarIcon size={18} /> : activeTab === 'supply' ? <ShoppingBag size={18} /> : <Wallet size={18} />}
-                  <span className="text-[9px] uppercase tracking-wider font-semibold">
-                    {activeTab === 'calendar' ? 'Schedule' : activeTab === 'supply' ? 'Supply' : 'Expenses'}
-                  </span>
-                </button>
-              ) : (
-                <button
-                  onClick={() => setActiveTab('calendar')}
-                  className="flex flex-col items-center gap-1 px-3.5 py-1 rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all cursor-pointer"
-                >
-                  <CalendarIcon size={18} />
-                  <span className="text-[9px] uppercase tracking-wider font-semibold">Calendar</span>
-                </button>
-              )}
+              {/* The mock's dynamic 4th slot cycled between Calendar/Supply/Expenses
+                  but nothing anywhere ever called setActiveTab('expenses') or
+                  ('supply') — those screens were unreachable via any tap target.
+                  Supply Hub has no backend module at all (out of scope). Expenses
+                  is real (Investments) and now needs a real, always-visible entry
+                  point, so it's split into its own static button below rather
+                  than left undiscoverable. */}
+              <button
+                onClick={() => setActiveTab('calendar')}
+                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'calendar' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+              >
+                <CalendarIcon size={18} />
+                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Calendar</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('expenses')}
+                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'expenses' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+              >
+                <Wallet size={18} />
+                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Expenses</span>
+              </button>
 
               <button
                 onClick={() => setActiveTab('settings')}
-                className={`flex flex-col items-center gap-1 px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'settings' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'settings' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                   }`}
               >
                 <MoreHorizontal size={18} />
-                <span className="text-[9px] uppercase tracking-wider font-semibold">Settings</span>
+                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Settings</span>
               </button>
             </div>
 
@@ -1550,22 +2519,30 @@ export default function Webapp() {
                     {/* Top drag handle indicator */}
                     <div className="w-12 h-1 bg-neutral-200 dark:bg-neutral-800 rounded-full mx-auto mb-5"></div>
 
-                    {/* SHEET: NEW ORDER */}
+                    {/* SHEET: NEW ORDER — real POST /api/orders, see
+                        handleCreateOrder. Replaces the previous mock form
+                        that only wrote to a local, never-rendered array. */}
                     {activeSheet === 'new-order' && (
                       <form onSubmit={handleCreateOrder} className="flex-1 flex flex-col">
                         <div className="flex justify-between items-center mb-6">
                           <button type="button" onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
                           <h3 className="font-serif text-xl md:text-2xl font-bold">New Order</h3>
-                          <button type="reset" className="text-xs font-semibold text-[var(--text-secondary)] hover:underline" onClick={() => setNewOrderForm({ customerName: '', phone: '', cakeCategory: 'Chocolate Truffle', weight: '1.5 kg', date: '2023-10-24', time: '4:00 PM', type: 'Pickup', totalAmount: '', advanceAmount: '' })}>Clear</button>
+                          <button type="reset" className="text-xs font-semibold text-[var(--text-secondary)] hover:underline cursor-pointer" onClick={() => { setNewOrderForm(getDefaultNewOrderForm()); setNewOrderAdvanceTouched(false); setNewOrderError(null); }}>Clear</button>
                         </div>
 
                         <div className="flex flex-col gap-6 overflow-y-auto pb-4">
+                          {newOrderError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                              <AlertCircle size={13} /> {newOrderError}
+                            </div>
+                          )}
+
                           {/* Sec 1: Customer details */}
                           <div>
                             <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
                               👤 1. Customer Details
                             </h4>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                               <input
                                 type="text"
                                 placeholder="Customer Name"
@@ -1576,12 +2553,19 @@ export default function Webapp() {
                               />
                               <input
                                 type="tel"
-                                placeholder="WhatsApp Number (e.g. +91 98765 43210)"
+                                placeholder="WhatsApp Number (e.g. 98765 43210)"
                                 value={newOrderForm.phone}
                                 onChange={(e) => setNewOrderForm({ ...newOrderForm, phone: e.target.value })}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
                               />
                             </div>
+                            <input
+                              type="text"
+                              placeholder="Delivery Address (optional)"
+                              value={newOrderForm.address}
+                              onChange={(e) => setNewOrderForm({ ...newOrderForm, address: e.target.value })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                            />
                           </div>
 
                           {/* Sec 2: Cake Details */}
@@ -1589,28 +2573,79 @@ export default function Webapp() {
                             <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
                               🎂 2. Cake & Production Details
                             </h4>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                               <select
                                 value={newOrderForm.cakeCategory}
                                 onChange={(e) => setNewOrderForm({ ...newOrderForm, cakeCategory: e.target.value })}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
                               >
-                                <option value="Chocolate Truffle">Chocolate Truffle</option>
-                                <option value="Black Forest">Black Forest</option>
-                                <option value="Red Velvet">Red Velvet</option>
-                                <option value="Butterscotch Bento">Butterscotch Bento</option>
+                                {CAKE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                               </select>
 
                               <select
-                                value={newOrderForm.weight}
-                                onChange={(e) => setNewOrderForm({ ...newOrderForm, weight: e.target.value })}
+                                value={newOrderForm.flavour}
+                                onChange={(e) => setNewOrderForm({ ...newOrderForm, flavour: e.target.value })}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
                               >
-                                <option value="500g">500g</option>
-                                <option value="1 kg">1 kg</option>
-                                <option value="1.5 kg">1.5 kg</option>
-                                <option value="2 kg">2 kg</option>
+                                {CAKE_FLAVOURS.map((f) => <option key={f} value={f}>{f}</option>)}
                               </select>
+                            </div>
+
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1.5 block">Weight (lb)</label>
+                            <div className="flex gap-2 mb-2 flex-wrap">
+                              {WEIGHT_PRESETS_LB.map((w) => (
+                                <button
+                                  key={w}
+                                  type="button"
+                                  onClick={() => setNewOrderForm({ ...newOrderForm, weightPreset: w })}
+                                  className={`px-3.5 py-2 text-xs font-bold rounded-xl border transition-all cursor-pointer ${newOrderForm.weightPreset === w
+                                    ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
+                                    : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
+                                    }`}
+                                >
+                                  {w} lb
+                                </button>
+                              ))}
+                              <button
+                                type="button"
+                                onClick={() => setNewOrderForm({ ...newOrderForm, weightPreset: 'custom' })}
+                                className={`px-3.5 py-2 text-xs font-bold rounded-xl border transition-all cursor-pointer ${newOrderForm.weightPreset === 'custom'
+                                  ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
+                                  : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
+                                  }`}
+                              >
+                                Custom
+                              </button>
+                            </div>
+                            {newOrderForm.weightPreset === 'custom' && (
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0"
+                                placeholder="Custom weight (lb)"
+                                value={newOrderForm.weightCustom}
+                                onChange={(e) => setNewOrderForm({ ...newOrderForm, weightCustom: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] font-bold mb-3"
+                                required
+                              />
+                            )}
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                              <input
+                                type="text"
+                                placeholder="Occasion (e.g. Birthday, optional)"
+                                value={newOrderForm.occasion}
+                                onChange={(e) => setNewOrderForm({ ...newOrderForm, occasion: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder="Quantity (optional, e.g. 12)"
+                                value={newOrderForm.quantity}
+                                onChange={(e) => setNewOrderForm({ ...newOrderForm, quantity: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                              />
                             </div>
                           </div>
 
@@ -1625,10 +2660,10 @@ export default function Webapp() {
                                 value={newOrderForm.date}
                                 onChange={(e) => setNewOrderForm({ ...newOrderForm, date: e.target.value })}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none"
+                                required
                               />
                               <input
-                                type="text"
-                                placeholder="Delivery Time (e.g. 4:00 PM)"
+                                type="time"
                                 value={newOrderForm.time}
                                 onChange={(e) => setNewOrderForm({ ...newOrderForm, time: e.target.value })}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
@@ -1638,9 +2673,9 @@ export default function Webapp() {
                             <div className="flex gap-3">
                               <button
                                 type="button"
-                                onClick={() => setNewOrderForm({ ...newOrderForm, type: 'Pickup' })}
-                                className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${newOrderForm.type === 'Pickup'
-                                  ? 'bg-orange-50 border-[var(--accent)] text-[var(--accent)]'
+                                onClick={() => setNewOrderForm({ ...newOrderForm, deliveryType: 'Pickup' })}
+                                className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${newOrderForm.deliveryType === 'Pickup'
+                                  ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
                                   : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
                                   }`}
                               >
@@ -1648,28 +2683,46 @@ export default function Webapp() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => setNewOrderForm({ ...newOrderForm, type: 'Delivery' })}
-                                className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${newOrderForm.type === 'Delivery'
-                                  ? 'bg-orange-50 border-[var(--accent)] text-[var(--accent)]'
+                                onClick={() => setNewOrderForm({ ...newOrderForm, deliveryType: 'Delivery' })}
+                                className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${newOrderForm.deliveryType === 'Delivery'
+                                  ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
                                   : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
                                   }`}
                               >
                                 🛵 Delivery
                               </button>
                             </div>
+                            {newOrderForm.deliveryType === 'Delivery' && (
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder="Delivery Charge (₹, optional)"
+                                value={newOrderForm.deliveryCharge}
+                                onChange={(e) => setNewOrderForm({ ...newOrderForm, deliveryCharge: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] mt-3"
+                              />
+                            )}
                           </div>
 
-                          {/* Sec 4: Payment Calculator */}
+                          {/* Sec 4: Payment */}
                           <div>
                             <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                              ₹ 4. Payment Calculator
+                              ₹ 4. Payment
                             </h4>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                               <input
                                 type="number"
                                 placeholder="Total Amount (₹)"
                                 value={newOrderForm.totalAmount}
-                                onChange={(e) => setNewOrderForm({ ...newOrderForm, totalAmount: e.target.value })}
+                                onChange={(e) => {
+                                  const total = e.target.value;
+                                  const pct = bakerProfile?.payment.defaultAdvancePercentage;
+                                  const suggestedAdvance =
+                                    !newOrderAdvanceTouched && pct && total
+                                      ? String(Math.round((Number(total) * pct) / 100))
+                                      : newOrderForm.advanceAmount;
+                                  setNewOrderForm({ ...newOrderForm, totalAmount: total, advanceAmount: suggestedAdvance });
+                                }}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] font-bold"
                                 required
                               />
@@ -1677,10 +2730,27 @@ export default function Webapp() {
                                 type="number"
                                 placeholder="Advance Received (₹)"
                                 value={newOrderForm.advanceAmount}
-                                onChange={(e) => setNewOrderForm({ ...newOrderForm, advanceAmount: e.target.value })}
+                                onChange={(e) => {
+                                  setNewOrderAdvanceTouched(true);
+                                  setNewOrderForm({ ...newOrderForm, advanceAmount: e.target.value });
+                                }}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] font-bold"
                               />
                             </div>
+                            {bakerProfile?.payment.defaultAdvancePercentage ? (
+                              <p className="text-[10px] text-[var(--text-secondary)] -mt-1.5 mb-3">
+                                Suggested advance: {bakerProfile.payment.defaultAdvancePercentage}% of total (your default, editable in Settings).
+                              </p>
+                            ) : null}
+
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1.5 block">Advance Collected Via</label>
+                            <select
+                              value={newOrderForm.paymentMethod}
+                              onChange={(e) => setNewOrderForm({ ...newOrderForm, paymentMethod: e.target.value as typeof newOrderForm.paymentMethod })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none mb-3"
+                            >
+                              {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m.replace('_', ' ')}</option>)}
+                            </select>
 
                             <div className="flex justify-between items-center bg-[var(--background)] p-4 rounded-xl border border-[var(--border)] text-xs font-bold">
                               <span>Balance to Collect:</span>
@@ -1694,236 +2764,462 @@ export default function Webapp() {
 
                         <button
                           type="submit"
-                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-4 cursor-pointer"
+                          disabled={newOrderSubmitting}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-4 cursor-pointer"
                         >
-                          <MessageSquare size={16} /> Save & Send WhatsApp Receipt
+                          {newOrderSubmitting ? (
+                            <>
+                              <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                              Creating Order...
+                            </>
+                          ) : (
+                            <>
+                              <Check size={16} /> Create Order
+                            </>
+                          )}
                         </button>
                       </form>
                     )}
 
-                    {/* SHEET: CUSTOMER PROFILE DETAILS */}
-                    {activeSheet === 'customer-profile' && selectedCustomer && (
+                    {/* SHEET: ORDER DETAIL (real data, GET /api/orders/:orderNumber) —
+                        reuses the same sheet slot as Customer Profile per
+                        explicit decision, rather than a new screen. This is
+                        read-only: there are no per-order action buttons here
+                        (status update / WhatsApp send) in the current design —
+                        flagged as a real functional gap, not something I'm
+                        inventing UI for. */}
+                    {activeSheet === 'customer-profile' && (orderDetailLoading || orderDetailError || selectedOrderDetail) && (
                       <div className="flex-1 flex flex-col animate-fadeIn">
                         <div className="flex justify-between items-center mb-6">
-                          <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
-                          <h3 className="font-serif text-xl md:text-2xl font-bold">Customer Profile</h3>
-                          <button className="text-xs font-semibold text-[var(--text-secondary)] hover:underline" onClick={() => setActiveSheet('edit-profile')}>Edit</button>
+                          <button
+                            onClick={() => { setActiveSheet('none'); setSelectedOrderDetail(null); }}
+                            className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                          >
+                            <X size={20} />
+                          </button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">Order Detail</h3>
+                          <span className="w-8" />
                         </div>
 
-                        {/* Header Overview Card */}
-                        <div className="bg-[var(--background)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm text-center mb-4 flex flex-col items-center">
-                          <div className="w-16 h-16 rounded-full bg-amber-100 text-amber-800 border border-amber-200 flex items-center justify-center font-bold text-2xl mb-3 shadow-inner">
-                            {selectedCustomer.name.charAt(0)}
+                        {orderDetailLoading && (
+                          <div className="flex flex-col gap-4">
+                            <div className="h-24 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
+                            <div className="h-40 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
                           </div>
-                          <h4 className="font-serif font-bold text-xl flex items-center gap-1.5">
-                            {selectedCustomer.name}
-                            {selectedCustomer.tag && (
-                              <span className="bg-[#EA580C]/10 text-[#EA580C] text-[9px] font-extrabold px-2.5 py-0.5 rounded-full border border-[#EA580C]/20">
-                                {selectedCustomer.tag}
-                              </span>
-                            )}
-                          </h4>
+                        )}
 
-                          <span className="text-xs text-[var(--text-secondary)] mt-2">Lifetime Value (LTV):</span>
-                          <span className="text-3xl font-extrabold text-[var(--text-primary)] mt-1">
-                            ₹{selectedCustomer.ltv.toLocaleString('en-IN')}
-                          </span>
-                        </div>
+                        {orderDetailError && (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2">
+                            <AlertCircle size={14} /> {orderDetailError}
+                          </div>
+                        )}
 
-                        {/* Contact row buttons */}
-                        <div className="grid grid-cols-2 gap-3 mb-6">
-                          <a
-                            href={`https://wa.me/${selectedCustomer.phone.replace(/\D/g, '')}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="py-3 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50"
-                          >
-                            <MessageSquare size={14} className="text-emerald-600" />
-                            Message
-                          </a>
-                          <a
-                            href={`tel:${selectedCustomer.phone}`}
-                            className="py-3 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50"
-                          >
-                            <Phone size={14} className="text-blue-600" />
-                            Call
-                          </a>
-                        </div>
-
-                        {/* Order History */}
-                        <h4 className="font-serif font-bold text-sm mb-3">Order History ({selectedCustomer.ordersCount})</h4>
-
-                        <div className="flex flex-col gap-3 mb-6 overflow-y-auto max-h-52 pr-1">
-                          {orders
-                            .filter(o => o.customerName.toLowerCase() === selectedCustomer.name.toLowerCase())
-                            .map((o) => (
-                              <div key={o.id} className="bg-[var(--surface)] p-4 rounded-xl border border-[var(--border)] flex justify-between items-center shadow-sm">
-                                <div>
-                                  <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{o.deliveryDate}</span>
-                                  <h5 className="font-serif font-bold text-sm text-[var(--text-primary)] mt-0.5">{o.cakeName}</h5>
-                                  <p className="text-[10px] text-[var(--text-secondary)] mt-1">{o.type} • Order #{o.id}</p>
-                                </div>
-                                <div className="text-right">
-                                  <span className="text-xs font-bold text-[var(--text-primary)]">₹{o.totalAmount}</span>
-                                  <div className="mt-2">
-                                    <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[9px] font-extrabold px-2.5 py-0.5 rounded-full border border-emerald-100">
-                                      Delivered
-                                    </span>
-                                  </div>
-                                </div>
+                        {!orderDetailLoading && !orderDetailError && selectedOrderDetail && (
+                          <div className="flex flex-col gap-4 overflow-y-auto">
+                            <div className="bg-[var(--background)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm">
+                              <div className="flex justify-between items-start mb-3">
+                                <span className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">{selectedOrderDetail.orderId}</span>
+                                <span className="text-[10.5px] font-bold px-3 py-1 rounded-full bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50">
+                                  {selectedOrderDetail.status}
+                                </span>
                               </div>
-                            ))}
-                        </div>
+                              <h4 className="font-serif font-bold text-xl">{selectedOrderDetail.cake.category} — {selectedOrderDetail.cake.flavour}</h4>
+                              <p className="text-xs text-[var(--text-secondary)] mt-1">
+                                {selectedOrderDetail.cake.weightInPounds ? `${selectedOrderDetail.cake.weightInPounds} lb` : ''}
+                                {selectedOrderDetail.cake.quantity ? ` • Qty ${selectedOrderDetail.cake.quantity}` : ''}
+                                {selectedOrderDetail.occasion ? ` • ${selectedOrderDetail.occasion}` : ''}
+                              </p>
+                            </div>
 
-                        <button
-                          onClick={() => {
-                            setNewOrderForm({
-                              ...newOrderForm,
-                              customerName: selectedCustomer.name,
-                              phone: selectedCustomer.phone
-                            });
-                            setActiveSheet('new-order');
-                          }}
-                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
-                        >
-                          <Plus size={16} /> New Order for {selectedCustomer.name.split(' ')[0]}
-                        </button>
+                            <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
+                              <h5 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">Customer</h5>
+                              <p className="text-sm font-bold">{selectedOrderDetail.customer.name}</p>
+                              <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.phone || 'No phone on file'}</p>
+                              {selectedOrderDetail.customer.address && (
+                                <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.address}</p>
+                              )}
+                              <div className="grid grid-cols-2 gap-3 mt-3">
+                                {selectedOrderDetail.customer.phone && (
+                                  <a
+                                    href={`https://wa.me/${selectedOrderDetail.customer.phone.replace(/\D/g, '')}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                  >
+                                    <MessageSquare size={14} className="text-emerald-600" /> Message
+                                  </a>
+                                )}
+                                {selectedOrderDetail.customer.phone && (
+                                  <a
+                                    href={`tel:${selectedOrderDetail.customer.phone}`}
+                                    className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                  >
+                                    <Phone size={14} className="text-blue-600" /> Call
+                                  </a>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
+                              <h5 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">Delivery</h5>
+                              <p className="text-xs">
+                                {selectedOrderDetail.delivery.type === 'pickup' ? 'Pickup' : 'Delivery'} • {selectedOrderDetail.delivery.date}
+                                {selectedOrderDetail.delivery.time ? ` at ${selectedOrderDetail.delivery.time}` : ''}
+                              </p>
+                              {selectedOrderDetail.delivery.charge > 0 && (
+                                <p className="text-xs text-[var(--text-secondary)] mt-1">Delivery charge: ₹{selectedOrderDetail.delivery.charge}</p>
+                              )}
+                            </div>
+
+                            <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
+                              <h5 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">Payment</h5>
+                              <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Total</span><span className="font-bold">₹{selectedOrderDetail.payment.totalPrice.toLocaleString('en-IN')}</span></div>
+                              <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Advance Paid</span><span className="font-bold">₹{selectedOrderDetail.payment.advancePaid.toLocaleString('en-IN')}</span></div>
+                              <div className="flex justify-between text-xs py-1 border-t border-[var(--border)]/50 mt-1 pt-2"><span className="text-[var(--text-secondary)]">Balance Due</span><span className="font-bold text-[var(--accent)]">₹{selectedOrderDetail.payment.balanceDue.toLocaleString('en-IN')}</span></div>
+                              <span className="inline-block mt-2 text-[10px] font-bold px-2.5 py-1 rounded-full bg-neutral-50 dark:bg-neutral-900 border border-[var(--border)]">{selectedOrderDetail.payment.paymentStatus}</span>
+                            </div>
+
+                            {selectedOrderDetail.customFields && selectedOrderDetail.customFields.length > 0 && (
+                              <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
+                                <h5 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">Additional Details</h5>
+                                {selectedOrderDetail.customFields.map((f: { label: string; value: string }, i: number) => (
+                                  <div key={i} className="flex justify-between text-xs py-1">
+                                    <span className="text-[var(--text-secondary)]">{f.label}</span>
+                                    <span className="font-medium text-right">{f.value}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
 
-                    {/* SHEET: EDIT PROFILE & LEGAL */}
+                    {/* SHEET: CUSTOMER PROFILE DETAILS (real data, GET /api/customers/:id) */}
+                    {activeSheet === 'customer-profile' && (customerProfileLoading || customerProfileError || selectedCustomerProfile) && (
+                      <div className="flex-1 flex flex-col animate-fadeIn">
+                        <div className="flex justify-between items-center mb-6">
+                          <button
+                            onClick={() => { setActiveSheet('none'); setSelectedCustomerProfile(null); }}
+                            className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                          >
+                            <X size={20} />
+                          </button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">Customer Profile</h3>
+                          <span className="w-8" />
+                        </div>
+
+                        {customerProfileLoading && (
+                          <div className="flex flex-col gap-4">
+                            <div className="h-40 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
+                            <div className="h-24 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
+                          </div>
+                        )}
+
+                        {customerProfileError && (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2">
+                            <AlertCircle size={14} /> {customerProfileError}
+                          </div>
+                        )}
+
+                        {!customerProfileLoading && !customerProfileError && selectedCustomerProfile && (
+                          <>
+                            {/* Header Overview Card */}
+                            <div className="bg-[var(--background)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm text-center mb-4 flex flex-col items-center">
+                              <div className="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-950/30 text-amber-800 dark:text-amber-400 border border-amber-200 dark:border-amber-900 flex items-center justify-center font-bold text-2xl mb-3 shadow-inner">
+                                {selectedCustomerProfile.name.charAt(0)}
+                              </div>
+                              <h4 className="font-serif font-bold text-xl flex items-center gap-1.5">
+                                {selectedCustomerProfile.name}
+                              </h4>
+
+                              <span className="text-xs text-[var(--text-secondary)] mt-2">Lifetime Value (LTV):</span>
+                              <span className="text-3xl font-extrabold text-[var(--text-primary)] mt-1">
+                                ₹{selectedCustomerProfile.summary.lifetimeValue.toLocaleString('en-IN')}
+                              </span>
+                              {selectedCustomerProfile.summary.outstandingBalance > 0 && (
+                                <span className="text-[10px] font-bold text-[var(--accent)] mt-1">
+                                  ₹{selectedCustomerProfile.summary.outstandingBalance.toLocaleString('en-IN')} outstanding
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Contact row buttons */}
+                            {selectedCustomerProfile.phone && (
+                              <div className="grid grid-cols-2 gap-3 mb-6">
+                                <a
+                                  href={`https://wa.me/${selectedCustomerProfile.phone.replace(/\D/g, '')}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="py-3 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                >
+                                  <MessageSquare size={14} className="text-emerald-600" />
+                                  Message
+                                </a>
+                                <a
+                                  href={`tel:${selectedCustomerProfile.phone}`}
+                                  className="py-3 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                >
+                                  <Phone size={14} className="text-blue-600" />
+                                  Call
+                                </a>
+                              </div>
+                            )}
+
+                            {/* Order History — no cake name available at this level
+                                (only order/status/amount fields), same limitation as
+                                Orders list/Dashboard. Rows link into the real
+                                order-detail view already built. */}
+                            <h4 className="font-serif font-bold text-sm mb-3">Order History ({selectedCustomerProfile.summary.totalOrders})</h4>
+
+                            <div className="flex flex-col gap-3 mb-6 overflow-y-auto max-h-52 pr-1">
+                              {selectedCustomerProfile.orders.length === 0 && (
+                                <p className="text-xs text-[var(--text-secondary)] text-center py-4">No orders yet.</p>
+                              )}
+                              {selectedCustomerProfile.orders.map((o) => (
+                                <div
+                                  key={o.orderId}
+                                  onClick={() => openOrderDetail(o.orderNumber)}
+                                  className="bg-[var(--surface)] p-4 rounded-xl border border-[var(--border)] flex justify-between items-center shadow-sm cursor-pointer hover:border-[var(--accent)]/30"
+                                >
+                                  <div>
+                                    <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{o.deliveryDate}</span>
+                                    <h5 className="font-serif font-bold text-sm text-[var(--text-primary)] mt-0.5">{o.orderNumber}</h5>
+                                    <p className="text-[10px] text-[var(--text-secondary)] mt-1">{o.status}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <span className="text-xs font-bold text-[var(--text-primary)]">₹{o.totalPrice.toLocaleString('en-IN')}</span>
+                                    <div className="mt-2">
+                                      <span className={`text-[9px] font-extrabold px-2.5 py-0.5 rounded-full border ${o.balanceDue > 0 ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]' : 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100'}`}>
+                                        {o.paymentStatus}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            <button
+                              onClick={() => {
+                                setNewOrderForm({
+                                  ...newOrderForm,
+                                  customerName: selectedCustomerProfile.name,
+                                  phone: selectedCustomerProfile.phone || '',
+                                });
+                                setActiveSheet('new-order');
+                              }}
+                              className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
+                            >
+                              <Plus size={16} /> New Order for {selectedCustomerProfile.name.split(' ')[0]}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* SHEET: PROFILE & LEGAL (real data, read-only) —
+                        renamed from "Edit Profile & Legal": there is no
+                        PUT endpoint for businessName/ownerName/fssaiNumber/
+                        whatsappReceiptEnabled, only for UPI settings. A save
+                        button here would silently do nothing real, so this
+                        is now a real-data viewer, not an editor. Flagging
+                        this clearly — if profile editing is expected to
+                        work, the backend needs a new endpoint first. */}
                     {activeSheet === 'edit-profile' && (
                       <div className="flex-1 flex flex-col">
                         <div className="flex justify-between items-center mb-6">
                           <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
-                          <h3 className="font-serif text-xl md:text-2xl font-bold">Edit Profile & Legal</h3>
-                          <button onClick={() => setActiveSheet('none')} className="text-xs font-semibold text-[var(--accent)] hover:underline">Save</button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">Profile & Legal</h3>
+                          <span className="w-8" />
                         </div>
 
-                        <div className="flex flex-col gap-6 pb-6 overflow-y-auto">
+                        {/* Skeleton/error only gate the TRUE first load (no
+                            cached profile yet). Once bakerProfile exists,
+                            the form stays mounted through any background
+                            refetch (e.g. after Save, or after a photo
+                            upload) — fetchBakerProfile briefly flips
+                            bakerProfileLoading back to true, which
+                            previously unmounted this whole form via this
+                            same condition, causing a full skeleton flash
+                            and lost scroll position on every save. */}
+                        {bakerProfileLoading && !bakerProfile && (
+                          <div className="flex flex-col gap-4">
+                            <div className="h-24 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
+                            <div className="h-24 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
+                          </div>
+                        )}
 
-                          {/* Bakery Identity section */}
-                          <div>
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-4 flex items-center gap-1.5">
-                              🏪 1. Bakery Brand Identity
-                            </h4>
+                        {bakerProfileError && !bakerProfile && (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2">
+                            <AlertCircle size={14} /> {bakerProfileError}
+                          </div>
+                        )}
 
-                            <div className="flex flex-col items-center mb-4">
-                              <div className="w-20 h-20 rounded-full bg-orange-50 dark:bg-[#1A0C06] border border-orange-100 flex flex-col items-center justify-center text-orange-600 relative cursor-pointer shadow-inner">
-                                <span className="text-3xl">🎂</span>
-                                <span className="text-[8px] font-extrabold mt-1 tracking-tight">THE SUGAR</span>
-                                <div className="absolute -bottom-1 -right-1 w-7 h-7 bg-white dark:bg-[#1F110C] rounded-full border border-[var(--border)] flex items-center justify-center shadow-md">
-                                  📷
+                        {bakerProfile && (
+                          <form onSubmit={handleSaveProfile} className="flex flex-col gap-6 pb-6 overflow-y-auto">
+
+                            {editProfileError && (
+                              <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                <AlertCircle size={13} /> {editProfileError}
+                              </div>
+                            )}
+                            {editProfileSuccess && (
+                              <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200/50 text-emerald-700 dark:text-emerald-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                <CheckCircle2 size={13} /> Profile updated.
+                              </div>
+                            )}
+                            {logoUploadError && (
+                              <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                <AlertCircle size={13} /> {logoUploadError}
+                              </div>
+                            )}
+
+                            {/* Profile picture — POST /api/uploads/signed-url + /confirm */}
+                            <div className="flex flex-col items-center gap-3">
+                              <div className="w-20 h-20 rounded-full overflow-hidden bg-[var(--background)] border border-[var(--border)] flex items-center justify-center text-2xl font-bold text-[var(--text-secondary)]">
+                                {bakerProfile.business.logoUrl ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img src={bakerProfile.business.logoUrl} alt="Profile" className="w-full h-full object-cover" />
+                                ) : (
+                                  (bakerProfile.business.ownerName || bakerProfile.business.businessName || '?').charAt(0)
+                                )}
+                              </div>
+                              <label className="text-xs font-bold text-[var(--accent)] cursor-pointer hover:underline">
+                                {logoUploading ? 'Uploading...' : 'Change Photo'}
+                                <input
+                                  type="file"
+                                  accept="image/png,image/jpeg,image/webp"
+                                  className="hidden"
+                                  disabled={logoUploading}
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) handleProfilePictureUpload(file);
+                                    e.target.value = '';
+                                  }}
+                                />
+                              </label>
+                            </div>
+
+                            <div>
+                              <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-4 flex items-center gap-1.5">
+                                🏪 Bakery Brand Identity
+                              </h4>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                  <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Business / Bakery Name</label>
+                                  <div className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs">{bakerProfile.business.businessName || '—'}</div>
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Owner Full Name</label>
+                                  <input
+                                    type="text"
+                                    value={editProfileForm.ownerName}
+                                    onChange={(e) => setEditProfileForm({ ...editProfileForm, ownerName: e.target.value })}
+                                    className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                                  />
                                 </div>
                               </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                              <div>
-                                <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Business / Bakery Name</label>
+                              <div className="mt-3">
+                                <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Phone Number</label>
                                 <input
-                                  type="text"
-                                  value={bakeryName}
-                                  onChange={(e) => setBakeryName(e.target.value)}
-                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none"
+                                  type="tel"
+                                  placeholder="10-digit mobile number"
+                                  value={editProfileForm.phone}
+                                  onChange={(e) => setEditProfileForm({ ...editProfileForm, phone: e.target.value })}
+                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
                                 />
-                              </div>
-                              <div>
-                                <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Owner Full Name</label>
-                                <input
-                                  type="text"
-                                  value={ownerName}
-                                  onChange={(e) => setOwnerName(e.target.value)}
-                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none"
-                                />
+                                <p className="text-[10px] text-[var(--text-secondary)] mt-1">Contact info only — login is by email, this number isn't used to sign in.</p>
                               </div>
                             </div>
-                          </div>
 
-                          {/* Regulatory Compliance section */}
-                          <div>
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                              🛡️ 2. Regulatory Compliance
-                            </h4>
-                            <h5 className="text-xs font-bold text-[var(--text-primary)] mb-1">FSSAI License Verification</h5>
-                            <p className="text-[10px] text-[var(--text-secondary)] leading-relaxed mb-3">Mandatory for commercial food operations in India to build buyer trust.</p>
-
-                            <div className="flex gap-2">
+                            <div>
+                              <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                                % Payment Defaults
+                              </h4>
+                              <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Default Advance Percentage</label>
                               <input
-                                type="text"
-                                placeholder="14-Digit FSSAI License Number"
-                                value={fssaiLicense}
-                                onChange={(e) => setFssaiLicense(e.target.value.replace(/\D/g, '').slice(0, 14))}
-                                className="flex-1 bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                                type="number"
+                                min="0"
+                                max="100"
+                                placeholder="e.g. 50"
+                                value={editProfileForm.defaultAdvancePercentage}
+                                onChange={(e) => setEditProfileForm({ ...editProfileForm, defaultAdvancePercentage: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] font-bold"
                               />
-                              <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-xs font-bold px-3.5 py-3 rounded-xl border border-emerald-100 flex items-center justify-center">
-                                Verified ✓
-                              </span>
+                              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Suggests an advance amount when logging a New Order — doesn't block orders with a different advance.</p>
                             </div>
 
-                            <div className="flex items-center gap-2 bg-emerald-50/50 dark:bg-emerald-950/10 p-3 rounded-xl border border-emerald-100/50 text-[10px] text-emerald-700 dark:text-emerald-400 mt-2.5">
-                              <CheckCircle2 size={14} />
-                              <span>Your license details are encrypted and secure with end-to-end protection.</span>
-                            </div>
-                          </div>
-
-                          {/* Operational Defaults */}
-                          <div>
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                              ⚙️ 3. Operational Defaults
-                            </h4>
-
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                              <div>
-                                <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1.5 block">Default Advance Percentage Required</label>
-                                <select
-                                  value={defaultAdvance}
-                                  onChange={(e) => setDefaultAdvance(e.target.value)}
-                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
-                                >
-                                  <option value="25%">25%</option>
-                                  <option value="50%">50%</option>
-                                  <option value="75%">75%</option>
-                                  <option value="100%">100%</option>
-                                </select>
-                              </div>
-
-                              <div className="flex justify-between items-center mt-6">
-                                <span className="text-xs font-medium text-[var(--text-primary)]">Auto-generate & attach WhatsApp links</span>
-                                <label className="relative inline-flex items-center cursor-pointer">
-                                  <input
-                                    type="checkbox"
-                                    checked={autoSendReceipts}
-                                    onChange={() => setAutoSendReceipts(!autoSendReceipts)}
-                                    className="sr-only peer"
-                                  />
-                                  <div className="w-9 h-5 bg-neutral-200 peer-focus:outline-none rounded-full peer dark:bg-neutral-800 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-[var(--accent)]"></div>
-                                </label>
+                            <div>
+                              <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                                🛡️ Regulatory Compliance
+                              </h4>
+                              <h5 className="text-xs font-bold text-[var(--text-primary)] mb-1">FSSAI License</h5>
+                              <div className="flex gap-2">
+                                <div className="flex-1 bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs">{bakerProfile.verification.fssaiNumber || 'Not on file'}</div>
+                                {bakerProfile.verification.fssaiNumber && (
+                                  <span className={`text-xs font-bold px-3.5 py-3 rounded-xl border flex items-center justify-center ${bakerProfile.verification.fssaiVerified ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100' : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]'}`}>
+                                    {bakerProfile.verification.fssaiVerified ? 'Verified ✓' : 'Pending'}
+                                  </span>
+                                )}
                               </div>
                             </div>
-                          </div>
 
-                        </div>
+                            <div>
+                              <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                                ⚙️ Notification Preference
+                              </h4>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs font-medium text-[var(--text-primary)]">WhatsApp receipts suggested by default</span>
+                                <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${bakerProfile.payment.whatsappReceiptEnabled ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100' : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]'}`}>
+                                  {bakerProfile.payment.whatsappReceiptEnabled ? 'On' : 'Off'}
+                                </span>
+                              </div>
+                            </div>
 
-                        <button
-                          onClick={() => setActiveSheet('none')}
-                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
-                        >
-                          💾 Save Changes
-                        </button>
+                            <button
+                              type="submit"
+                              disabled={editProfileSubmitting}
+                              className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-2 cursor-pointer"
+                            >
+                              {editProfileSubmitting ? (
+                                <>
+                                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                  Saving...
+                                </>
+                              ) : (
+                                <>
+                                  <Check size={16} /> Save Changes
+                                </>
+                              )}
+                            </button>
+
+                          </form>
+                        )}
                       </div>
                     )}
 
-                    {/* SHEET: MANAGE UPI COLLECTION */}
+                    {/* SHEET: MANAGE UPI COLLECTION (real, functional — the
+                        only profile field with an actual PUT endpoint) */}
                     {activeSheet === 'manage-upi' && (
-                      <div className="flex-1 flex flex-col">
+                      <form onSubmit={handleSaveUpiSettings} className="flex-1 flex flex-col">
                         <div className="flex justify-between items-center mb-6">
-                          <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
+                          <button type="button" onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
                           <h3 className="font-serif text-xl md:text-2xl font-bold">Manage UPI Collection</h3>
-                          <button onClick={() => setActiveSheet('none')} className="text-xs font-semibold text-[var(--accent)] hover:underline">Done</button>
+                          <span className="w-8" />
                         </div>
 
                         <div className="flex flex-col gap-6 pb-6 overflow-y-auto">
+
+                          {upiError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                              <AlertCircle size={13} /> {upiError}
+                            </div>
+                          )}
+                          {upiSuccess && (
+                            <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200/50 text-emerald-700 dark:text-emerald-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                              <CheckCircle2 size={13} /> UPI settings updated.
+                            </div>
+                          )}
 
                           {/* Sec 1: VPA */}
                           <div>
@@ -1931,197 +3227,156 @@ export default function Webapp() {
                               ⚡ 1. Virtual Payment Address (VPA)
                             </h4>
                             <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Your UPI ID</label>
-                            <div className="flex gap-2">
-                              <input
-                                type="text"
-                                value={upiId}
-                                onChange={(e) => setUpiId(e.target.value)}
-                                className="flex-1 bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs font-bold outline-none"
-                              />
-                              <span className="bg-emerald-50 text-emerald-700 text-xs font-bold px-3.5 py-3 rounded-xl border border-emerald-100 flex items-center justify-center">
-                                Verified ✓
-                              </span>
-                            </div>
+                            <input
+                              type="text"
+                              value={upiForm.upiId}
+                              onChange={(e) => setUpiForm({ ...upiForm, upiId: e.target.value })}
+                              placeholder="yourname@okaxis"
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs font-bold outline-none"
+                              required
+                            />
                             <p className="text-[10px] text-[var(--text-secondary)] mt-2">All automated payment links and WhatsApp advance requests will route to this VPA.</p>
                           </div>
 
-                          {/* Sec 2: Dynamic QR Code */}
-                          <div className="flex flex-col items-center">
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 self-start flex items-center gap-1.5">
-                              📱 2. Dynamic QR Code Preview
-                            </h4>
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Merchant display name (optional)</label>
+                            <input
+                              type="text"
+                              value={upiForm.merchantName}
+                              onChange={(e) => setUpiForm({ ...upiForm, merchantName: e.target.value })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none"
+                            />
+                          </div>
 
-                            <div className="w-48 h-48 bg-white rounded-3xl border border-[var(--border)] shadow-sm flex flex-col items-center justify-center p-5 relative select-none">
-                              <div className="w-full h-full border-4 border-dashed border-neutral-100 rounded-2xl flex items-center justify-center relative">
-                                <div className="grid grid-cols-5 gap-2.5 w-32 h-32 opacity-80">
-                                  {Array.from({ length: 25 }).map((_, i) => {
-                                    const fill = [0, 4, 6, 8, 12, 14, 16, 18, 20, 24].includes(i);
-                                    return (
-                                      <div key={i} className={`rounded-sm ${fill ? 'bg-[#2D1B14]' : 'bg-neutral-100'}`} />
-                                    );
-                                  })}
-                                </div>
-                                <div className="absolute w-10 h-10 bg-white rounded-full shadow-md border border-[var(--border)] flex items-center justify-center z-10">
-                                  <div className="w-5 h-5 bg-[#2D1B14] rounded-full flex items-center justify-center">
-                                    <span className="text-[9px] font-bold text-white">k</span>
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Enable dynamic QR</span>
+                            <label className="relative inline-flex items-center cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={upiForm.generateDynamicQR}
+                                onChange={() => setUpiForm({ ...upiForm, generateDynamicQR: !upiForm.generateDynamicQR })}
+                                className="sr-only peer"
+                              />
+                              <div className="w-9 h-5 bg-neutral-200 peer-focus:outline-none rounded-full peer dark:bg-neutral-800 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-[var(--accent)]"></div>
+                            </label>
+                          </div>
+
+                          {/* Dynamic QR preview kept as decoration — not backed
+                              by a real generated QR; no bank-settlement
+                              endpoint exists, so the mock's fabricated
+                              "HDFC Bank •••• 4092" account card was removed
+                              rather than shown as if it were real. */}
+                          {upiForm.generateDynamicQR && (
+                            <div className="flex flex-col items-center">
+                              <div className="w-48 h-48 bg-white rounded-3xl border border-[var(--border)] shadow-sm flex flex-col items-center justify-center p-5 relative select-none">
+                                <div className="w-full h-full border-4 border-dashed border-neutral-100 rounded-2xl flex items-center justify-center relative">
+                                  <div className="grid grid-cols-5 gap-2.5 w-32 h-32 opacity-80">
+                                    {Array.from({ length: 25 }).map((_, i) => {
+                                      const fill = [0, 4, 6, 8, 12, 14, 16, 18, 20, 24].includes(i);
+                                      return (
+                                        <div key={i} className={`rounded-sm ${fill ? 'bg-[#2D1B14]' : 'bg-neutral-100'}`} />
+                                      );
+                                    })}
+                                  </div>
+                                  <div className="absolute w-10 h-10 bg-white rounded-full shadow-md border border-[var(--border)] flex items-center justify-center z-10">
+                                    <div className="w-5 h-5 bg-[#2D1B14] rounded-full flex items-center justify-center">
+                                      <span className="text-[9px] font-bold text-white">k</span>
+                                    </div>
                                   </div>
                                 </div>
                               </div>
+                              <p className="text-[10px] text-[var(--text-secondary)] mt-3">Illustrative preview only.</p>
                             </div>
-                            <p className="text-[10px] text-[var(--text-secondary)] mt-3">Generated automatically on every new order summary.</p>
-
-                            <div className="w-full flex items-center justify-between bg-zinc-50 border border-zinc-100 p-4 rounded-xl mt-4">
-                              <div className="flex items-center gap-2">
-                                <span className="text-orange-600 bg-orange-100/50 p-1.5 rounded-lg border border-orange-200">🛡️</span>
-                                <div>
-                                  <h5 className="font-bold text-[10px]">100% Secure UPI Collection</h5>
-                                  <p className="text-[9px] text-[var(--text-secondary)] mt-0.5">Powered by Razorpay • PCI DSS Compliant</p>
-                                </div>
-                              </div>
-                              <span className="text-[9px] font-extrabold text-neutral-400">Razorpay</span>
-                            </div>
-                          </div>
-
-                          {/* Sec 3: Bank Settlment info */}
-                          <div>
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                              🏦 3. Linked Settlement Bank Account
-                            </h4>
-
-                            <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)] shadow-sm flex items-center justify-between cursor-pointer group hover:border-[var(--accent)] transition-all">
-                              <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center font-bold text-blue-800 text-xs">
-                                  HDFC
-                                </div>
-                                <div>
-                                  <h5 className="font-bold text-xs">HDFC Bank •••• 4092</h5>
-                                  <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Savings Account</p>
-                                </div>
-                              </div>
-
-                              <span className="text-[9px] font-extrabold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full uppercase">
-                                Primary Settlement
-                              </span>
-                            </div>
-                            <button className="text-xs font-bold text-[var(--accent)] hover:underline mt-3 block text-center mx-auto">Change Bank Account</button>
-                          </div>
+                          )}
 
                         </div>
 
                         <button
-                          onClick={() => setActiveSheet('none')}
-                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
+                          type="submit"
+                          disabled={upiSubmitting}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
                         >
-                          ✓ Verify & Update UPI Settings
+                          {upiSubmitting ? 'Saving...' : '✓ Update UPI Settings'}
                         </button>
-                      </div>
+                      </form>
                     )}
 
-                    {/* SHEET: SUBSCRIPTION & AUTOPAY */}
+                    {/* SHEET: SUBSCRIPTION & AUTOPAY (real data, GET /api/billing/status).
+                        The mandate section and invoices list had no backing
+                        endpoint at all (no list-invoices API, no mandate
+                        detail beyond autoRenew) — replaced with what's real. */}
                     {activeSheet === 'subscription-autopay' && (
                       <div className="flex-1 flex flex-col">
                         <div className="flex justify-between items-center mb-6">
                           <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
                           <h3 className="font-serif text-xl md:text-2xl font-bold">Subscription & AutoPay</h3>
-                          <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-0.5 rounded-full border border-emerald-100">
-                            Active ✓
-                          </span>
+                          {billingStatus && (
+                            <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${billingStatus.subscriptionStatus === 'ACTIVE' ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100' : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]'}`}>
+                              {billingStatus.subscriptionStatus}
+                            </span>
+                          )}
                         </div>
 
-                        <div className="flex flex-col gap-6 pb-6 overflow-y-auto">
+                        {billingLoading && (
+                          <div className="h-40 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
+                        )}
 
-                          {/* 1. Plan status */}
-                          <div>
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                              👑 1. Plan & Trial Status
-                            </h4>
-
-                            <div className="bg-[var(--surface)] p-5 rounded-2xl border border-[var(--border)] shadow-sm">
-                              <div className="flex justify-between items-center py-1">
-                                <span className="text-xs text-[var(--text-secondary)]">Current Plan</span>
-                                <span className="text-xs font-bold">Early Adopter Pro</span>
-                              </div>
-                              <div className="flex justify-between items-center py-2 border-t border-[var(--border)]/50 mt-2.5">
-                                <span className="text-xs text-[var(--text-secondary)]">Billing Cycle</span>
-                                <span className="text-xs font-bold">₹149 / month</span>
-                              </div>
-
-                              <div className="bg-orange-50/50 dark:bg-[#1A0C06] border border-orange-100/50 p-4 rounded-xl flex items-center gap-3.5 mt-4">
-                                <span className="text-3xl">📅</span>
-                                <div>
-                                  <h5 className="font-bold text-xs text-[var(--accent)]">Trial Active: 72 Days Remaining</h5>
-                                  <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Your trial started on Sep 4, 2026 • Renews on Nov 14, 2026</p>
-                                </div>
-                              </div>
-                            </div>
+                        {billingError && (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2">
+                            <AlertCircle size={14} /> {billingError}
                           </div>
+                        )}
 
-                          {/* 2. AutoPay mandate details */}
-                          <div>
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                              🛡️ 2. UPI AutoPay Mandate
-                            </h4>
+                        {!billingLoading && !billingError && billingStatus && (
+                          <div className="flex flex-col gap-6 pb-6 overflow-y-auto">
 
-                            <div className="bg-zinc-50 border border-zinc-100 p-4 rounded-2xl flex items-center justify-between">
-                              <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 bg-white rounded-full border border-[var(--border)] flex items-center justify-center font-bold text-[#EA580C] text-xs shadow-sm">
-                                  UPI
+                            <div>
+                              <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                                👑 Plan & Trial Status
+                              </h4>
+
+                              <div className="bg-[var(--surface)] p-5 rounded-2xl border border-[var(--border)] shadow-sm">
+                                <div className="flex justify-between items-center py-1">
+                                  <span className="text-xs text-[var(--text-secondary)]">Current Plan</span>
+                                  <span className="text-xs font-bold">{billingStatus.plan || '—'}</span>
                                 </div>
-                                <div>
-                                  <h5 className="font-bold text-xs">Razorpay UPI AutoPay Mandate</h5>
-                                  <p className="text-[10px] text-emerald-600 font-bold mt-0.5">Mandate Status: Active ✓</p>
-                                  <p className="text-[9.5px] text-[var(--text-secondary)] mt-1">Next auto-debit of ₹149 scheduled on Nov 14, 2026.</p>
+                                <div className="flex justify-between items-center py-2 border-t border-[var(--border)]/50 mt-2.5">
+                                  <span className="text-xs text-[var(--text-secondary)]">Auto-renew</span>
+                                  <span className="text-xs font-bold">{billingStatus.autoRenew ? 'On' : 'Off'}</span>
                                 </div>
+                                {billingStatus.nextBillingDate && (
+                                  <div className="flex justify-between items-center py-2 border-t border-[var(--border)]/50 mt-2.5">
+                                    <span className="text-xs text-[var(--text-secondary)]">Next billing date</span>
+                                    <span className="text-xs font-bold">{billingStatus.nextBillingDate}</span>
+                                  </div>
+                                )}
+
+                                {billingStatus.subscriptionStatus === 'TRIAL' && (
+                                  <div className="bg-orange-50/50 dark:bg-[#1A0C06] border border-orange-100/50 p-4 rounded-xl flex items-center gap-3.5 mt-4">
+                                    <span className="text-3xl">📅</span>
+                                    <div>
+                                      <h5 className="font-bold text-xs text-[var(--accent)]">Trial Active: {billingStatus.trialDaysRemaining} Days Remaining</h5>
+                                      {billingStatus.trialEndDate && (
+                                        <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Ends {billingStatus.trialEndDate}</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
-
-                              <span className="text-2xl">🔒</span>
                             </div>
 
-                            <div className="flex justify-between items-center mt-3 px-1 text-[10px] text-[var(--text-secondary)]">
-                              <span>Your payments are secured by Razorpay.<br />We never store your UPI PIN or bank details.</span>
-                              <span className="font-bold text-[var(--accent)] hover:underline cursor-pointer">Revoke Mandate &gt;</span>
+                            <div className="bg-orange-50/50 dark:bg-[#1A0C06] border border-orange-100/50 p-3 rounded-xl text-[10px] text-[var(--text-secondary)] flex items-center gap-2">
+                              <Info size={13} /> Invoice/billing history isn't available via the API yet.
                             </div>
+
                           </div>
-
-                          {/* 3. Invoices list */}
-                          <div>
-                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                              📄 3. Invoices & Billing History
-                            </h4>
-
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                              <div className="bg-[var(--surface)] p-4 rounded-xl border border-[var(--border)] flex justify-between items-center shadow-sm">
-                                <div>
-                                  <h5 className="font-semibold text-xs text-[var(--text-primary)]">Invoice #KMA-2026-001</h5>
-                                  <span className="text-[10px] text-[var(--text-secondary)]">Oct 14, 2026 • 11:32 AM</span>
-                                </div>
-                                <span className="text-[10px] font-bold text-[var(--text-secondary)] bg-neutral-100 border border-[var(--border)] px-2.5 py-1 rounded-full">₹0.00</span>
-                              </div>
-                              <div className="bg-[var(--surface)] p-4 rounded-xl border border-[var(--border)] flex justify-between items-center shadow-sm">
-                                <div>
-                                  <h5 className="font-semibold text-xs text-[var(--text-primary)]">Invoice #KMA-2026-002</h5>
-                                  <span className="text-[10px] text-[var(--text-secondary)]">Sep 14, 2026 • 10:08 AM</span>
-                                </div>
-                                <span className="text-[10px] font-bold text-[var(--text-secondary)] bg-neutral-100 border border-[var(--border)] px-2.5 py-1 rounded-full">₹0.00</span>
-                              </div>
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={() => setActiveSheet('choose-plan')}
-                              className="text-xs font-bold text-[var(--accent)] hover:underline mt-4 block text-center mx-auto"
-                            >
-                              View All Invoices &gt;
-                            </button>
-                          </div>
-
-                        </div>
+                        )}
 
                         <button
                           onClick={() => setActiveSheet('choose-plan')}
                           className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
                         >
-                          🔒 Manage UPI Mandate on Razorpay
+                          🔒 Manage Plan on Razorpay
                         </button>
                       </div>
                     )}
@@ -2206,11 +3461,17 @@ export default function Webapp() {
 
                         </div>
 
+                        {subscriptionError && (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2 mb-3">
+                            <AlertCircle size={13} /> {subscriptionError}
+                          </div>
+                        )}
                         <button
-                          onClick={() => setActiveSheet('none')}
-                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
+                          onClick={handleConfirmSubscription}
+                          disabled={subscriptionSubmitting}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
                         >
-                          ✓ Confirm Early Adopter Plan & Setup AutoPay
+                          {subscriptionSubmitting ? 'Starting...' : '✓ Confirm Early Adopter Plan & Setup AutoPay'}
                         </button>
                       </div>
                     )}
@@ -2227,12 +3488,12 @@ export default function Webapp() {
                         <div className="flex flex-col gap-6 pb-6 overflow-y-auto">
 
                           {/* Trial alert */}
-                          <div className="bg-orange-50 border border-orange-100/50 p-4 rounded-2xl flex items-center gap-3.5">
+                          <div className="bg-orange-50 dark:bg-amber-950/20 border border-orange-100/50 dark:border-amber-900 p-4 rounded-2xl flex items-center gap-3.5">
                             <span className="text-3xl">🎂</span>
                             <div>
                               <h4 className="font-bold text-sm text-[var(--text-primary)]">Your free trial is ending soon.</h4>
-                              <div className="inline-flex items-center gap-1 bg-[#EA580C] text-white px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold mt-1.5">
-                                🕒 7 Days Remaining
+                              <div className="inline-flex items-center gap-1 bg-[var(--accent)] text-white px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold mt-1.5">
+                                🕒 {bakerProfile?.subscription.trialDaysRemaining ?? '—'} Days Remaining
                               </div>
                             </div>
                           </div>
@@ -2243,7 +3504,7 @@ export default function Webapp() {
                               <h4 className="font-serif font-bold text-base flex items-center gap-2">
                                 👑 Early Adopter Pro Plan
                               </h4>
-                              <span className="bg-orange-50 text-[10px] font-bold text-[#EA580C] px-2.5 py-0.5 rounded-full border border-orange-100">Locked-in Price</span>
+                              <span className="bg-orange-50 dark:bg-amber-950/20 text-[10px] font-bold text-[var(--accent)] px-2.5 py-0.5 rounded-full border border-orange-100 dark:border-amber-900">Locked-in Price</span>
                             </div>
 
                             <span className="text-3xl font-extrabold block mt-3 text-[var(--text-primary)]">
@@ -2299,7 +3560,7 @@ export default function Webapp() {
 
                           {/* WhatsApp support callout */}
                           <div className="bg-[var(--surface)] p-5 rounded-2xl border border-[var(--border)] shadow-sm flex flex-col items-center text-center">
-                            <div className="w-16 h-16 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center text-3xl border border-emerald-100 mb-3 shadow-inner">
+                            <div className="w-16 h-16 rounded-full bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 flex items-center justify-center text-3xl border border-emerald-100 dark:border-emerald-900 mb-3 shadow-inner">
                               💬
                             </div>
                             <h4 className="font-serif font-bold text-lg text-[var(--text-primary)]">Chat with Kamai Support</h4>
@@ -2343,19 +3604,19 @@ export default function Webapp() {
                           </div>
 
                           {/* Issue reporting */}
-                          <div className="bg-red-50/50 dark:bg-red-950/10 p-4 rounded-2xl border border-red-200/40 flex items-center justify-between cursor-pointer hover:bg-red-50 transition-colors">
+                          <div className="bg-red-50/50 dark:bg-red-950/10 p-4 rounded-2xl border border-red-200/40 dark:border-red-900 flex items-center justify-between cursor-pointer hover:bg-red-50 dark:hover:bg-red-950/20 transition-colors">
                             <div className="flex items-center gap-3">
                               <span className="text-2xl">🐛</span>
                               <div>
                                 <h5 className="font-bold text-xs text-red-800 dark:text-red-400">Report a Technical Bug or Issue</h5>
-                                <p className="text-[10px] text-red-600/70 mt-0.5">Let us know and we'll fix it quickly.</p>
+                                <p className="text-[10px] text-red-600/70 dark:text-red-400/70 mt-0.5">Let us know and we&apos;ll fix it quickly.</p>
                               </div>
                             </div>
-                            <ChevronRight size={16} className="text-red-400" />
+                            <ChevronRight size={16} className="text-red-400 dark:text-red-500" />
                           </div>
 
                           <div className="text-center text-[10px] text-[var(--text-secondary)] mt-4">
-                            <p>We're here to help you grow!</p>
+                            <p>We&apos;re here to help you grow!</p>
                             <p className="font-semibold text-[var(--text-primary)] mt-1">Your success is our success.</p>
                             <p className="mt-4 border-t border-[var(--border)]/50 pt-3.5">Kamai OMS • Built for Independent Indian Bakers v1.0</p>
                           </div>
@@ -2379,14 +3640,14 @@ export default function Webapp() {
                             <span className="text-2xl">🛡️</span>
                             <div>
                               <h4 className="font-bold text-xs text-[var(--text-primary)]">Last updated: October 2026</h4>
-                              <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Review Kamai's merchant terms, data protection standards, and refund policies.</p>
+                              <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Review Kamai&apos;s merchant terms, data protection standards, and refund policies.</p>
                             </div>
                           </div>
 
                           <div className="flex flex-col gap-2">
                             <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">1. Merchant Terms of Service</h4>
                             <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              By accessing or using Kamai (the "Platform"), you agree to be bound by these Terms of Service. Kamai is an Order Management System built for independent home bakers to manage orders, customers, invoices, payments, and business insights.
+                              By accessing or using Kamai (the &quot;Platform&quot;), you agree to be bound by these Terms of Service. Kamai is an Order Management System built for independent home bakers to manage orders, customers, invoices, payments, and business insights.
                             </p>
                             <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
                               You are responsible for maintaining the accuracy of your business information, fulfilling orders on time, and complying with all applicable laws and food safety regulations in India.
@@ -2411,7 +3672,7 @@ export default function Webapp() {
 
                         <button
                           type="button"
-                          className="w-full bg-[var(--surface)] text-[var(--accent)] border border-[var(--accent)]/50 hover:bg-orange-50 font-semibold py-4 rounded-2xl transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
+                          className="w-full bg-[var(--surface)] text-[var(--accent)] border border-[var(--accent)]/50 hover:bg-orange-50 dark:hover:bg-orange-950/20 font-semibold py-4 rounded-2xl transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
                         >
                           📄 Download Terms as PDF
                         </button>

@@ -1,9 +1,18 @@
 @import "tailwindcss";
 
+/* Tailwind v4's dark: variant defaults to the prefers-color-scheme media
+   query. This app has its own light/dark toggle that sets a .dark class
+   on <html> (see app/page.tsx), independent of the OS-level preference —
+   without this override, dark: utility classes track the OS setting while
+   the --text-primary/--surface/etc. custom properties above track the
+   .dark class, so the two can disagree and produce illegible combinations
+   whenever a user's system theme differs from their in-app toggle choice. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --background: #F7F5F0;
   --surface: #FFFFFF;
-  --surface-glass: rgba(255, 255, 255, 0.75);
+  --surface-glass: rgba(247, 245, 240, 0.75);
   --text-primary: #2D1B14;
   --text-secondary: rgba(45, 27, 20, 0.65);
   --accent: #EA580C;
@@ -15,7 +24,7 @@
 .dark {
   --background: #2D1B14;
   --surface: #1F110C;
-  --surface-glass: rgba(31, 17, 12, 0.75);
+  --surface-glass: rgba(45, 27, 20, 0.75);
   --text-primary: #F7F5F0;
   --text-secondary: rgba(247, 245, 240, 0.65);
   --accent: #EA580C;
