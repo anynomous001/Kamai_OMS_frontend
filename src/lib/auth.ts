@@ -14,7 +14,7 @@
 
 import { api } from './api';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://kamai-backend-6n6v.onrender.com';
 
 export interface SendEmailOtpResponse {
   success: boolean;

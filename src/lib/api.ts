@@ -6,7 +6,7 @@
  * kamai_access_token across the frontend/backend origin difference.
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://kamai-backend-6n6v.onrender.com';
 
 export class ApiError extends Error {
   status: number;
