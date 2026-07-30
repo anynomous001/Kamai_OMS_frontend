@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Plus_Jakarta_Sans, Instrument_Serif } from "next/font/google";
 import "./globals.css";
 
@@ -17,9 +17,35 @@ const instrument = Instrument_Serif({
   display: "swap",
 });
 
+const SITE_URL = "https://app.getkamai.online";
+const TITLE = "Kamai — The Baker Cockpit";
+const DESCRIPTION = "Run your home bakery like a real business.";
+
 export const metadata: Metadata = {
-  title: "Kamai Cockpit",
-  description: "Run your home bakery like a real business.",
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: TITLE,
+    template: "%s | Kamai",
+  },
+  description: DESCRIPTION,
+  applicationName: "Kamai",
+  openGraph: {
+    title: TITLE,
+    description: DESCRIPTION,
+    url: SITE_URL,
+    siteName: "Kamai",
+    type: "website",
+    locale: "en_IN",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: TITLE,
+    description: DESCRIPTION,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#2D1B14",
 };
 
 export default function RootLayout({
