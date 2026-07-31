@@ -9,7 +9,7 @@ import {
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
-  UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown
+  UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -132,6 +132,10 @@ const MENU_ITEM_UNIT_LABELS: Record<MenuItemUnit, string> = {
   per_dozen: 'per dozen',
 };
 
+// Same hardcoded-prod-fallback + env-override convention as API_BASE_URL in
+// lib/api.ts — this is the public-facing app origin, not the API origin.
+const PUBLIC_MENU_BASE_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://app.getkamai.online';
+
 interface RealMenuItem {
   id: string;
   name: string;
@@ -154,6 +158,11 @@ interface RealBakerProfile {
     email: string | null;
     logoUrl: string | null;
     accountVerified: boolean;
+  };
+  menu: {
+    menuSlug: string | null;
+    menuSlugEditable: boolean;
+    whatsappNumber: string | null;
   };
   verification: {
     fssaiNumber: string | null;
@@ -274,7 +283,7 @@ export default function Webapp() {
     'none' | 'new-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
     'subscription-status' | 'help-support' | 'legal-policies' |
-    'my-menu' | 'add-edit-menu-item'
+    'my-menu' | 'add-edit-menu-item' | 'share-menu'
   >('none');
 
   // Business state — bakeryName/ownerName/phoneNumber/upiId/fssaiLicense/
@@ -416,6 +425,13 @@ export default function Webapp() {
   const [menuItemSubmitting, setMenuItemSubmitting] = useState(false);
   const [menuItemPhotoUploading, setMenuItemPhotoUploading] = useState(false);
   const [menuItemPhotoUploadError, setMenuItemPhotoUploadError] = useState<string | null>(null);
+
+  // Share My Menu panel (activeSheet 'share-menu')
+  const [menuLinkCopied, setMenuLinkCopied] = useState(false);
+  const [menuSlugEditing, setMenuSlugEditing] = useState(false);
+  const [menuSlugInput, setMenuSlugInput] = useState('');
+  const [menuSlugSubmitting, setMenuSlugSubmitting] = useState(false);
+  const [menuSlugError, setMenuSlugError] = useState<string | null>(null);
 
   // Real baker profile (GET /api/baker/profile) — backs Settings tab,
   // Edit Profile & Legal, Manage UPI, and pre-fills the UPI form.
@@ -830,6 +846,38 @@ export default function Webapp() {
       fetchMenuItems(); // resync from server on failure
     } finally {
       setMenuItemReordering(false);
+    }
+  };
+
+  const handleCopyMenuLink = (menuSlug: string) => {
+    navigator.clipboard.writeText(`${PUBLIC_MENU_BASE_URL}/m/${menuSlug}`).then(() => {
+      setMenuLinkCopied(true);
+      setTimeout(() => setMenuLinkCopied(false), 2000);
+    });
+  };
+
+  const handleSaveMenuSlug = async () => {
+    const slug = menuSlugInput.trim();
+    if (!slug) {
+      setMenuSlugError('Enter a menu link.');
+      return;
+    }
+    // One-time edit per the backend — the UI must be explicit about this
+    // before the baker confirms, since it can't be undone from here.
+    if (!window.confirm('You can only do this once. Your old link will stop working. Continue?')) {
+      return;
+    }
+
+    setMenuSlugSubmitting(true);
+    setMenuSlugError(null);
+    try {
+      await api.patch('/api/baker/menu-slug', { menuSlug: slug });
+      setMenuSlugEditing(false);
+      fetchBakerProfile();
+    } catch (err: any) {
+      setMenuSlugError(err.message || 'Failed to update menu link.');
+    } finally {
+      setMenuSlugSubmitting(false);
     }
   };
 
@@ -2368,6 +2416,22 @@ export default function Webapp() {
                           <div className="flex items-center gap-2">
                             <UtensilsCrossed size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
                             <span className="text-xs font-medium text-[var(--text-primary)]">My Menu</span>
+                          </div>
+                          <ChevronRight size={14} className="text-[var(--text-secondary)]" />
+                        </div>
+
+                        <div
+                          onClick={() => {
+                            setMenuSlugEditing(false);
+                            setMenuSlugInput(bakerProfile?.menu.menuSlug || '');
+                            setMenuSlugError(null);
+                            setActiveSheet('share-menu');
+                          }}
+                          className="flex items-center justify-between py-2.5 border-t border-[var(--border)]/50 cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Link2 size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Share My Menu</span>
                           </div>
                           <ChevronRight size={14} className="text-[var(--text-secondary)]" />
                         </div>
@@ -4180,6 +4244,126 @@ export default function Webapp() {
                           )}
                         </button>
                       </form>
+                    )}
+
+                    {/* SHEET: SHARE MY MENU (Action 26, Settings addition) —
+                        URL built from GET /api/baker/profile's menu.menuSlug;
+                        one-time edit via PATCH /api/baker/menu-slug. */}
+                    {activeSheet === 'share-menu' && (
+                      <div className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                          <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">Share My Menu</h3>
+                          <span className="w-8" />
+                        </div>
+
+                        {!bakerProfile?.menu.menuSlug ? (
+                          <div className="text-center py-10 px-2">
+                            <p className="text-xs text-[var(--text-secondary)] max-w-[280px] mx-auto">
+                              You don&apos;t have a published menu link yet — add your first item in My Menu to get one.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setActiveSheet('my-menu')}
+                              className="mt-4 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-5 py-2.5 rounded-2xl text-xs font-bold shadow-md active:scale-95 transition-all cursor-pointer"
+                            >
+                              Go to My Menu
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-6 overflow-y-auto pb-4">
+                            <p className="text-xs text-[var(--text-secondary)] -mt-2">
+                              Share this link anywhere — Instagram bio, WhatsApp status — so customers can view your menu without installing Kamai.
+                            </p>
+
+                            <div>
+                              <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1.5 block">Your menu link</label>
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs truncate">
+                                  {PUBLIC_MENU_BASE_URL.replace(/^https?:\/\//, '')}/m/{bakerProfile.menu.menuSlug}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyMenuLink(bakerProfile.menu.menuSlug!)}
+                                  className="shrink-0 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white p-3 rounded-xl transition-all cursor-pointer"
+                                  aria-label="Copy menu link"
+                                >
+                                  {menuLinkCopied ? <Check size={16} /> : <Copy size={16} />}
+                                </button>
+                              </div>
+                              {menuLinkCopied && <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1.5 font-semibold">Copied!</p>}
+                            </div>
+
+                            {/* QR code — no new dependency: a plain <img> against a
+                                public QR image endpoint, consistent with this app
+                                already loading product images from a third-party
+                                URL (see Supply Hub). The menu URL is public data
+                                anyway, nothing sensitive crosses to that service. */}
+                            <div className="flex flex-col items-center gap-2">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(`${PUBLIC_MENU_BASE_URL}/m/${bakerProfile.menu.menuSlug}`)}`}
+                                alt="QR code linking to your menu"
+                                className="w-[140px] h-[140px] rounded-2xl border border-[var(--border)]"
+                                width={140}
+                                height={140}
+                              />
+                              <p className="text-[10px] text-[var(--text-secondary)]">Scan to open your menu</p>
+                            </div>
+
+                            <div className="border-t border-[var(--border)] pt-5">
+                              {menuSlugError && (
+                                <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2 mb-3">
+                                  <AlertCircle size={13} /> {menuSlugError}
+                                </div>
+                              )}
+
+                              {!bakerProfile.menu.menuSlugEditable ? (
+                                <p className="text-[10px] text-[var(--text-secondary)]">
+                                  Your menu link has already been changed once and can&apos;t be changed again.
+                                </p>
+                              ) : !menuSlugEditing ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setMenuSlugEditing(true)}
+                                  className="text-xs font-bold text-[var(--accent)] hover:underline cursor-pointer"
+                                >
+                                  Change link
+                                </button>
+                              ) : (
+                                <div className="flex flex-col gap-2.5">
+                                  <label className="text-[10px] font-bold text-[var(--text-secondary)] block">
+                                    New menu link — you can only do this once. Your old link will stop working.
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={menuSlugInput}
+                                    onChange={(e) => setMenuSlugInput(e.target.value)}
+                                    className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                                  />
+                                  <div className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => { setMenuSlugEditing(false); setMenuSlugError(null); }}
+                                      className="flex-1 py-3 text-xs font-bold rounded-xl border border-[var(--border)] cursor-pointer"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={menuSlugSubmitting}
+                                      onClick={handleSaveMenuSlug}
+                                      className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white text-xs font-bold py-3 rounded-xl transition-all cursor-pointer"
+                                    >
+                                      {menuSlugSubmitting ? 'Saving...' : 'Save New Link'}
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                   </motion.div>
