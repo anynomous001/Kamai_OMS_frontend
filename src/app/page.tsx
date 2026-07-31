@@ -8,7 +8,8 @@ import {
   ArrowLeft, Search, Bell, Check, X, Shield, Phone, MessageSquare,
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
-  Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet
+  Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
+  UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -119,6 +120,30 @@ interface RealInvestmentEntry {
   totalCost: number;
   supplierName: string | null;
   purchaseDate: string;
+}
+
+// Real menu-item unit vocab (per confirmed backend contract, Action 26).
+const MENU_ITEM_UNITS = ['per_kg', 'per_piece', 'per_box', 'per_dozen'] as const;
+type MenuItemUnit = typeof MENU_ITEM_UNITS[number];
+const MENU_ITEM_UNIT_LABELS: Record<MenuItemUnit, string> = {
+  per_kg: 'per kg',
+  per_piece: 'per piece',
+  per_box: 'per box',
+  per_dozen: 'per dozen',
+};
+
+interface RealMenuItem {
+  id: string;
+  name: string;
+  category: string | null;
+  price: number;
+  unit: MenuItemUnit;
+  description: string | null;
+  photoUrl: string | null;
+  isAvailable: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface RealBakerProfile {
@@ -248,7 +273,8 @@ export default function Webapp() {
   const [activeSheet, setActiveSheet] = useState<
     'none' | 'new-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
-    'subscription-status' | 'help-support' | 'legal-policies'
+    'subscription-status' | 'help-support' | 'legal-policies' |
+    'my-menu' | 'add-edit-menu-item'
   >('none');
 
   // Business state — bakeryName/ownerName/phoneNumber/upiId/fssaiLicense/
@@ -332,6 +358,18 @@ export default function Webapp() {
     };
   }
 
+  function getDefaultMenuItemForm() {
+    return {
+      name: '',
+      category: '',
+      price: '',
+      unit: 'per_piece' as MenuItemUnit,
+      description: '',
+      photoPath: '', // staged storage path from the signed-upload flow, empty until a new photo is chosen
+      photoPreviewUrl: '', // existing item's photoUrl (edit mode) or a local object URL for a freshly-chosen file
+    };
+  }
+
   const [newOrderForm, setNewOrderForm] = useState(getDefaultNewOrderForm());
   const [newOrderSubmitting, setNewOrderSubmitting] = useState(false);
   const [newOrderError, setNewOrderError] = useState<string | null>(null);
@@ -362,6 +400,22 @@ export default function Webapp() {
   const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
   const [logExpenseSubmitting, setLogExpenseSubmitting] = useState(false);
   const [logExpenseError, setLogExpenseError] = useState<string | null>(null);
+
+  // Real menu items (GET /api/menu-items) — backs the "My Menu" sheet.
+  const [menuItemsList, setMenuItemsList] = useState<RealMenuItem[]>([]);
+  const [menuItemsLoading, setMenuItemsLoading] = useState(false);
+  const [menuItemsError, setMenuItemsError] = useState<string | null>(null);
+  const [menuItemReordering, setMenuItemReordering] = useState(false);
+  const [menuItemDeletingId, setMenuItemDeletingId] = useState<string | null>(null);
+
+  // Add/Edit Menu Item form (activeSheet 'add-edit-menu-item')
+  const [menuItemFormMode, setMenuItemFormMode] = useState<'add' | 'edit'>('add');
+  const [editingMenuItemId, setEditingMenuItemId] = useState<string | null>(null);
+  const [menuItemForm, setMenuItemForm] = useState(getDefaultMenuItemForm());
+  const [menuItemFormError, setMenuItemFormError] = useState<string | null>(null);
+  const [menuItemSubmitting, setMenuItemSubmitting] = useState(false);
+  const [menuItemPhotoUploading, setMenuItemPhotoUploading] = useState(false);
+  const [menuItemPhotoUploadError, setMenuItemPhotoUploadError] = useState<string | null>(null);
 
   // Real baker profile (GET /api/baker/profile) — backs Settings tab,
   // Edit Profile & Legal, Manage UPI, and pre-fills the UPI form.
@@ -610,6 +664,174 @@ export default function Webapp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, activeTab, investmentsPage]);
+
+  // Real menu items (GET /api/menu-items) — fetched whenever the "My Menu"
+  // sheet opens, same trigger pattern as the Expenses tab above.
+  const fetchMenuItems = useCallback(() => {
+    setMenuItemsLoading(true);
+    setMenuItemsError(null);
+    api
+      .get<{ success: boolean; data: { items: RealMenuItem[] } }>('/api/menu-items')
+      .then((res) => setMenuItemsList(res.data.items))
+      .catch((err: any) => setMenuItemsError(err.message || 'Failed to load menu items.'))
+      .finally(() => setMenuItemsLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (step === 'dashboard' && activeSheet === 'my-menu') {
+      fetchMenuItems();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, activeSheet]);
+
+  function openAddMenuItem() {
+    setMenuItemFormMode('add');
+    setEditingMenuItemId(null);
+    setMenuItemForm(getDefaultMenuItemForm());
+    setMenuItemFormError(null);
+    setMenuItemPhotoUploadError(null);
+    setActiveSheet('add-edit-menu-item');
+  }
+
+  function openEditMenuItem(item: RealMenuItem) {
+    setMenuItemFormMode('edit');
+    setEditingMenuItemId(item.id);
+    setMenuItemForm({
+      name: item.name,
+      category: item.category || '',
+      price: String(item.price),
+      unit: item.unit,
+      description: item.description || '',
+      photoPath: '',
+      photoPreviewUrl: item.photoUrl || '',
+    });
+    setMenuItemFormError(null);
+    setMenuItemPhotoUploadError(null);
+    setActiveSheet('add-edit-menu-item');
+  }
+
+  // Mirrors handleProfilePictureUpload's signed-upload + direct-PUT flow,
+  // but deliberately skips /api/uploads/confirm — MENU_ITEM_PHOTO is
+  // confirmed as a side effect of creating/updating the menu item itself
+  // (the backend verifies the object exists when photoPath is submitted),
+  // unlike BUSINESS_LOGO which writes straight onto the Baker row.
+  const handleMenuItemPhotoUpload = async (file: File) => {
+    setMenuItemPhotoUploading(true);
+    setMenuItemPhotoUploadError(null);
+    try {
+      const { data } = await api.post<{ success: boolean; data: { uploadUrl: string; filePath: string } }>(
+        '/api/uploads/signed-url',
+        { contentType: file.type, category: 'MENU_ITEM_PHOTO', originalFilename: file.name },
+      );
+
+      const uploadRes = await fetch(data.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!uploadRes.ok) {
+        throw new Error('Upload to storage failed. Please try again.');
+      }
+
+      setMenuItemForm((f) => ({ ...f, photoPath: data.filePath, photoPreviewUrl: URL.createObjectURL(file) }));
+    } catch (err: any) {
+      setMenuItemPhotoUploadError(err.message || 'Failed to upload photo.');
+    } finally {
+      setMenuItemPhotoUploading(false);
+    }
+  };
+
+  const handleSaveMenuItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMenuItemFormError(null);
+
+    // Client-side validation mirrors the backend's rules exactly (see
+    // menu-items.schemas.ts): name non-empty, price > 0, unit must be a
+    // valid option — so errors surface before the API call, not after.
+    const name = menuItemForm.name.trim();
+    if (!name) {
+      setMenuItemFormError('Item name is required.');
+      return;
+    }
+    const price = parseFloat(menuItemForm.price);
+    if (!price || price <= 0) {
+      setMenuItemFormError('Price must be greater than ₹0.');
+      return;
+    }
+    if (!MENU_ITEM_UNITS.includes(menuItemForm.unit)) {
+      setMenuItemFormError('Choose a valid unit.');
+      return;
+    }
+
+    setMenuItemSubmitting(true);
+    try {
+      const payload = {
+        name,
+        category: menuItemForm.category.trim() || undefined,
+        price,
+        unit: menuItemForm.unit,
+        description: menuItemForm.description.trim() || undefined,
+        ...(menuItemForm.photoPath ? { photoPath: menuItemForm.photoPath } : {}),
+      };
+
+      if (menuItemFormMode === 'edit' && editingMenuItemId) {
+        await api.put(`/api/menu-items/${editingMenuItemId}`, payload);
+      } else {
+        await api.post('/api/menu-items', payload);
+      }
+
+      setActiveSheet('none');
+      fetchMenuItems();
+    } catch (err: any) {
+      setMenuItemFormError(err.message || 'Failed to save menu item.');
+    } finally {
+      setMenuItemSubmitting(false);
+    }
+  };
+
+  const handleDeleteMenuItem = async (item: RealMenuItem) => {
+    if (!window.confirm(`Delete "${item.name}" from your menu? This can't be undone.`)) return;
+    setMenuItemDeletingId(item.id);
+    setMenuItemsError(null);
+    try {
+      await api.delete(`/api/menu-items/${item.id}`);
+      setMenuItemsList((list) => list.filter((i) => i.id !== item.id));
+    } catch (err: any) {
+      setMenuItemsError(err.message || 'Failed to delete item.');
+    } finally {
+      setMenuItemDeletingId(null);
+    }
+  };
+
+  const handleToggleMenuItemAvailability = async (item: RealMenuItem) => {
+    const nextAvailable = !item.isAvailable;
+    setMenuItemsList((list) => list.map((i) => (i.id === item.id ? { ...i, isAvailable: nextAvailable } : i)));
+    try {
+      await api.put(`/api/menu-items/${item.id}`, { isAvailable: nextAvailable });
+    } catch (err: any) {
+      setMenuItemsList((list) => list.map((i) => (i.id === item.id ? { ...i, isAvailable: item.isAvailable } : i)));
+      setMenuItemsError(err.message || 'Failed to update availability.');
+    }
+  };
+
+  const handleMoveMenuItem = async (index: number, direction: -1 | 1) => {
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= menuItemsList.length) return;
+
+    const reordered = [...menuItemsList];
+    [reordered[index], reordered[newIndex]] = [reordered[newIndex], reordered[index]];
+    setMenuItemsList(reordered);
+    setMenuItemReordering(true);
+    setMenuItemsError(null);
+    try {
+      await api.put('/api/menu-items/reorder', { menuItemIds: reordered.map((i) => i.id) });
+    } catch (err: any) {
+      setMenuItemsError(err.message || 'Failed to reorder items.');
+      fetchMenuItems(); // resync from server on failure
+    } finally {
+      setMenuItemReordering(false);
+    }
+  };
 
   // Real baker profile — fetched once entering the app and refetched after
   // any successful UPI-settings save so the Settings tab reflects it.
@@ -2128,6 +2350,26 @@ export default function Webapp() {
                           <span className="text-xs font-bold text-[var(--text-secondary)]">
                             {bakerProfile?.verification.fssaiNumber ? (bakerProfile.verification.fssaiVerified ? 'Verified' : 'Pending verification') : 'Not on file'}
                           </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Category 1b: Public Menu (Action 26 — Shareable Menu Link) */}
+                    <div className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] p-5 shadow-sm">
+                      <h4 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-4 flex items-center gap-1.5">
+                        🍰 Public Menu
+                      </h4>
+
+                      <div className="flex flex-col gap-1.5">
+                        <div
+                          onClick={() => setActiveSheet('my-menu')}
+                          className="flex items-center justify-between py-2.5 cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <UtensilsCrossed size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
+                            <span className="text-xs font-medium text-[var(--text-primary)]">My Menu</span>
+                          </div>
+                          <ChevronRight size={14} className="text-[var(--text-secondary)]" />
                         </div>
                       </div>
                     </div>
@@ -3677,6 +3919,267 @@ export default function Webapp() {
                           📄 Download Terms as PDF
                         </button>
                       </div>
+                    )}
+
+                    {/* SHEET: MY MENU (Action 26 — Shareable Menu Link,
+                        Screen A) — real GET /api/menu-items. Card styling
+                        mirrors the Expenses/Investment Ledger list; the
+                        sheet chrome (header/close/backdrop) mirrors
+                        Edit Profile & Manage UPI. */}
+                    {activeSheet === 'my-menu' && (
+                      <div className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                          <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">My Menu</h3>
+                          <button
+                            type="button"
+                            onClick={openAddMenuItem}
+                            className="p-1.5 text-[var(--accent)] hover:bg-orange-50 dark:hover:bg-orange-950/20 rounded-full transition-colors cursor-pointer"
+                            aria-label="Add menu item"
+                          >
+                            <Plus size={20} strokeWidth={2.5} />
+                          </button>
+                        </div>
+
+                        <div className="flex flex-col gap-3.5 overflow-y-auto pb-2">
+                          {menuItemsError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                              <AlertCircle size={13} /> {menuItemsError}
+                            </div>
+                          )}
+
+                          {menuItemsLoading &&
+                            [0, 1, 2].map((i) => (
+                              <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
+                            ))}
+
+                          {!menuItemsLoading && !menuItemsError && menuItemsList.length === 0 && (
+                            <div className="text-center py-10 flex flex-col items-center gap-3">
+                              <p className="text-xs text-[var(--text-secondary)] max-w-[280px]">
+                                No items yet. Customers can view this menu without installing Kamai — add your first item to get started.
+                              </p>
+                              <button
+                                type="button"
+                                onClick={openAddMenuItem}
+                                className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-5 py-2.5 rounded-2xl text-xs font-bold shadow-md active:scale-95 transition-all flex items-center gap-2 cursor-pointer"
+                              >
+                                <Plus size={16} strokeWidth={2.5} /> Add Item
+                              </button>
+                            </div>
+                          )}
+
+                          {!menuItemsLoading &&
+                            menuItemsList.map((item, index) => (
+                              <div
+                                key={item.id}
+                                className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex items-center gap-3.5"
+                              >
+                                <div className="w-14 h-14 shrink-0 rounded-2xl overflow-hidden bg-[var(--background)] border border-[var(--border)] flex items-center justify-center text-[var(--text-secondary)]">
+                                  {item.photoUrl ? (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img src={item.photoUrl} alt={item.name} className="w-full h-full object-cover" />
+                                  ) : (
+                                    <UtensilsCrossed size={18} />
+                                  )}
+                                </div>
+
+                                <div className="flex-1 min-w-0">
+                                  <h4 className="font-bold text-sm text-[var(--text-primary)] truncate">{item.name}</h4>
+                                  <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+                                    ₹{item.price.toLocaleString('en-IN')} <span className="text-[var(--text-secondary)]/80">{MENU_ITEM_UNIT_LABELS[item.unit]}</span>
+                                  </p>
+                                  {item.category && (
+                                    <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full mt-1.5 uppercase tracking-wide">
+                                      {item.category}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex flex-col items-end gap-2 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleMenuItemAvailability(item)}
+                                    className={`text-[10px] font-bold px-2.5 py-1 rounded-full border transition-colors cursor-pointer ${item.isAvailable
+                                      ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100'
+                                      : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]'
+                                      }`}
+                                  >
+                                    {item.isAvailable ? 'Available' : 'Sold Out'}
+                                  </button>
+
+                                  <div className="flex items-center gap-0.5">
+                                    <button
+                                      type="button"
+                                      disabled={index === 0 || menuItemReordering}
+                                      onClick={() => handleMoveMenuItem(index, -1)}
+                                      className="p-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                      aria-label="Move up"
+                                    >
+                                      <ArrowUp size={13} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={index === menuItemsList.length - 1 || menuItemReordering}
+                                      onClick={() => handleMoveMenuItem(index, 1)}
+                                      className="p-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                      aria-label="Move down"
+                                    >
+                                      <ArrowDown size={13} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditMenuItem(item)}
+                                      className="p-1 text-[var(--text-secondary)] hover:text-[var(--accent)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                      aria-label="Edit item"
+                                    >
+                                      <Pencil size={13} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={menuItemDeletingId === item.id}
+                                      onClick={() => handleDeleteMenuItem(item)}
+                                      className="p-1 text-[var(--text-secondary)] hover:text-red-600 disabled:opacity-40 rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                      aria-label="Delete item"
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SHEET: ADD/EDIT MENU ITEM (Action 26, Screen B) —
+                        real POST/PUT /api/menu-items[/:id]. Form shell
+                        mirrors New Order exactly (header/section/input/
+                        submit-button styling); photo upload mirrors the
+                        Profile & Legal "Change Photo" flow. */}
+                    {activeSheet === 'add-edit-menu-item' && (
+                      <form onSubmit={handleSaveMenuItem} className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                          <button type="button" onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">{menuItemFormMode === 'edit' ? 'Edit Item' : 'Add Menu Item'}</h3>
+                          <span className="w-8" />
+                        </div>
+
+                        <div className="flex flex-col gap-6 overflow-y-auto pb-4">
+                          {menuItemFormError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                              <AlertCircle size={13} /> {menuItemFormError}
+                            </div>
+                          )}
+                          {menuItemPhotoUploadError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                              <AlertCircle size={13} /> {menuItemPhotoUploadError}
+                            </div>
+                          )}
+
+                          {/* Photo — POST /api/uploads/signed-url (category=MENU_ITEM_PHOTO) */}
+                          <div className="flex flex-col items-center gap-3">
+                            <div className="w-20 h-20 rounded-2xl overflow-hidden bg-[var(--background)] border border-[var(--border)] flex items-center justify-center text-[var(--text-secondary)]">
+                              {menuItemForm.photoPreviewUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img src={menuItemForm.photoPreviewUrl} alt="Item" className="w-full h-full object-cover" />
+                              ) : (
+                                <UtensilsCrossed size={24} />
+                              )}
+                            </div>
+                            <label className="text-xs font-bold text-[var(--accent)] cursor-pointer hover:underline">
+                              {menuItemPhotoUploading ? 'Uploading...' : menuItemForm.photoPreviewUrl ? 'Change Photo' : 'Add Photo'}
+                              <input
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                className="hidden"
+                                disabled={menuItemPhotoUploading}
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) handleMenuItemPhotoUpload(file);
+                                  e.target.value = '';
+                                }}
+                              />
+                            </label>
+                          </div>
+
+                          <div>
+                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              🎂 Item Details
+                            </h4>
+                            <div className="flex flex-col gap-3">
+                              <input
+                                type="text"
+                                placeholder="Item Name (e.g. Chocolate Truffle Cake)"
+                                value={menuItemForm.name}
+                                onChange={(e) => setMenuItemForm({ ...menuItemForm, name: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                                required
+                              />
+                              <input
+                                type="text"
+                                list="menu-item-category-options"
+                                placeholder="Category (optional, e.g. Cakes)"
+                                value={menuItemForm.category}
+                                onChange={(e) => setMenuItemForm({ ...menuItemForm, category: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                              />
+                              <datalist id="menu-item-category-options">
+                                {CAKE_CATEGORIES.map((c) => <option key={c} value={c} />)}
+                              </datalist>
+
+                              <div className="grid grid-cols-2 gap-3">
+                                <div className="flex items-center border border-[var(--border)] rounded-xl bg-[var(--background)] px-3 focus-within:border-[var(--accent)] transition-colors">
+                                  <span className="text-[var(--text-secondary)] text-xs font-semibold">₹</span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    placeholder="Price"
+                                    value={menuItemForm.price}
+                                    onChange={(e) => setMenuItemForm({ ...menuItemForm, price: e.target.value })}
+                                    className="w-full py-3 px-2 text-xs outline-none bg-transparent font-bold"
+                                    required
+                                  />
+                                </div>
+                                <select
+                                  value={menuItemForm.unit}
+                                  onChange={(e) => setMenuItemForm({ ...menuItemForm, unit: e.target.value as MenuItemUnit })}
+                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
+                                >
+                                  {MENU_ITEM_UNITS.map((u) => (
+                                    <option key={u} value={u}>{MENU_ITEM_UNIT_LABELS[u]}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <textarea
+                                placeholder="Description (optional)"
+                                value={menuItemForm.description}
+                                onChange={(e) => setMenuItemForm({ ...menuItemForm, description: e.target.value })}
+                                rows={3}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] resize-none"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={menuItemSubmitting || menuItemPhotoUploading}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-4 cursor-pointer"
+                        >
+                          {menuItemSubmitting ? (
+                            <>
+                              <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                              Saving...
+                            </>
+                          ) : (
+                            <>
+                              <Check size={16} /> {menuItemFormMode === 'edit' ? 'Save Changes' : 'Add Item'}
+                            </>
+                          )}
+                        </button>
+                      </form>
                     )}
 
                   </motion.div>
