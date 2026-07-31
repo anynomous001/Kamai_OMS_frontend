@@ -694,7 +694,11 @@ export default function Webapp() {
   }, []);
 
   useEffect(() => {
-    if (step === 'dashboard' && activeSheet === 'my-menu') {
+    // Share My Menu's empty-state check depends on live item count (see
+    // handleSaveMenuSlug/the share-menu sheet below), so it needs the same
+    // fresh-on-open refetch as My Menu itself, not just whichever sheet the
+    // baker happened to open first.
+    if (step === 'dashboard' && (activeSheet === 'my-menu' || activeSheet === 'share-menu')) {
       fetchMenuItems();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -798,6 +802,13 @@ export default function Webapp() {
 
       setActiveSheet('none');
       fetchMenuItems();
+      // A baker's first-ever item lazily assigns bakerProfile.menu.menuSlug
+      // server-side (see ensureMenuSlug in menu-items.service.ts) — refresh
+      // the profile too so Share My Menu reflects that immediately instead
+      // of only after a full reload, same as handleCreateOrder refreshing
+      // both the dashboard and orders list rather than just the screen the
+      // sheet happened to be opened from.
+      fetchBakerProfile();
     } catch (err: any) {
       setMenuItemFormError(err.message || 'Failed to save menu item.');
     } finally {
@@ -4257,7 +4268,16 @@ export default function Webapp() {
                           <span className="w-8" />
                         </div>
 
-                        {!bakerProfile?.menu.menuSlug ? (
+                        {menuItemsLoading ? (
+                          <div className="flex flex-col gap-4">
+                            <div className="h-24 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
+                          </div>
+                        ) : menuItemsList.length === 0 ? (
+                          // Gated on live item count, not menuSlug presence — the
+                          // backend never clears menuSlug once assigned (a baker's
+                          // link stays reserved even if they delete every item), so
+                          // checking menuSlug alone would never show this state
+                          // again after the first item was ever added.
                           <div className="text-center py-10 px-2">
                             <p className="text-xs text-[var(--text-secondary)] max-w-[280px] mx-auto">
                               You don&apos;t have a published menu link yet — add your first item in My Menu to get one.
@@ -4270,6 +4290,11 @@ export default function Webapp() {
                               Go to My Menu
                             </button>
                           </div>
+                        ) : !bakerProfile?.menu.menuSlug ? (
+                          // Items exist but the profile fetch racing the menu-items
+                          // fetch hasn't landed yet — momentary, resolves itself
+                          // once fetchBakerProfile's response arrives.
+                          <div className="h-24 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />
                         ) : (
                           <div className="flex flex-col gap-6 overflow-y-auto pb-4">
                             <p className="text-xs text-[var(--text-secondary)] -mt-2">
