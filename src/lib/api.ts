@@ -6,7 +6,10 @@
  * kamai_access_token across the frontend/backend origin difference.
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://kamai-backend-6n6v.onrender.com';
+// `??` (not `||`) so an intentionally-empty string — same-origin relative
+// requests, used for the dev tunnel proxy in next.config.ts — doesn't fall
+// through to the production default the way a falsy-string check would.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'https://kamai-backend-6n6v.onrender.com';
 
 export class ApiError extends Error {
   status: number;
@@ -48,7 +51,11 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
     response = await fetch(`${API_BASE_URL}${path}`, {
       credentials: 'include',
       headers: {
-        'Content-Type': 'application/json',
+        // Fastify's strict JSON body parser rejects a request that declares
+        // Content-Type: application/json but sends no body at all (e.g. the
+        // receipt-image endpoint, which takes no body) — only set it when
+        // there's actually a body to parse.
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
         ...options.headers,
       },
       ...options,

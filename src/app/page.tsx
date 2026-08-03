@@ -9,7 +9,8 @@ import {
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
-  UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy
+  UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy,
+  Share2, Download
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -69,6 +70,18 @@ interface RealOrderListItem {
   status: RealOrderStatus;
   totalPrice: number;
   balanceDue: number;
+}
+
+// paymentStatus isn't present on the orders-list/dashboard endpoints (only
+// GET /api/orders/:orderNumber includes payment.paymentStatus) — derived
+// client-side using the same advancePaid-vs-totalPrice thresholds the
+// backend itself uses (orders.service.ts derivePaymentState), so no
+// backend change or extra per-card fetch is needed.
+type PaymentStatusValue = 'Unpaid' | 'Partially Paid' | 'Paid';
+function derivePaymentStatus(totalPrice: number, balanceDue: number): PaymentStatusValue {
+  if (balanceDue <= 0) return 'Paid';
+  if (balanceDue >= totalPrice) return 'Unpaid';
+  return 'Partially Paid';
 }
 
 interface OrdersPagination {
@@ -303,6 +316,27 @@ export default function Webapp() {
   const [orderDetailLoading, setOrderDetailLoading] = useState(false);
   const [orderDetailError, setOrderDetailError] = useState<string | null>(null);
 
+  // Branded receipt-image share (Order Detail screen) — two sequential
+  // backend calls (caption text via the existing /notifications/whatsapp
+  // endpoint keyed by the order's UUID `id`, then the branded PNG via the
+  // new /receipt-image endpoint keyed by the display `orderId`) followed
+  // by a fetch of the resulting signed image URL. navigator.share's file
+  // support is device/browser-dependent — can only be truly verified on a
+  // real phone in real WhatsApp, not in a desktop browser — so this always
+  // has a manual download + wa.me fallback for when it's unavailable.
+  //
+  // navigator.share() must run synchronously inside a live user-gesture —
+  // confirmed live (desktop Chrome) that calling it after the two awaited
+  // network round-trips above throws "Must be handling a user gesture",
+  // because that async work (image generation alone ran ~2.5s) outlasts
+  // the browser's activation window. So this is a two-tap flow: the first
+  // tap fetches everything and stores it in receiptSharePayload; a second,
+  // fresh tap calls navigator.share() with no awaits before it.
+  const [receiptSharing, setReceiptSharing] = useState(false);
+  const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
+  const [receiptShareFallback, setReceiptShareFallback] = useState(false);
+  const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; text: string } | null>(null);
+
   const openCustomerProfile = useCallback((customerId: string) => {
     setSelectedOrderDetail(null);
     setSelectedCustomerProfile(null);
@@ -320,6 +354,9 @@ export default function Webapp() {
     setSelectedOrderDetail(null);
     setSelectedCustomerProfile(null);
     setOrderDetailError(null);
+    setReceiptShareError(null);
+    setReceiptShareFallback(false);
+    setReceiptSharePayload(null);
     setActiveSheet('customer-profile');
     setOrderDetailLoading(true);
     api
@@ -327,6 +364,103 @@ export default function Webapp() {
       .then((res) => setSelectedOrderDetail(res.data))
       .catch((err: any) => setOrderDetailError(err.message || 'Failed to load order details.'))
       .finally(() => setOrderDetailLoading(false));
+  }, []);
+
+  const prepareReceiptShare = useCallback(async (order: { id: string; orderId: string }) => {
+    setReceiptShareError(null);
+    setReceiptShareFallback(false);
+    setReceiptSharePayload(null);
+    setReceiptSharing(true);
+    try {
+      const notifRes = await api.post<{ success: boolean; data: { whatsappUrl: string } }>(
+        '/api/notifications/whatsapp',
+        { orderId: order.id, template: 'RECEIPT' }
+      );
+      const text = new URL(notifRes.data.whatsappUrl).searchParams.get('text') || '';
+
+      const imageRes = await api.post<{ success: boolean; data: { imageUrl: string } }>(
+        `/api/orders/${order.orderId}/receipt-image`,
+        {}
+      );
+
+      const imgRes = await fetch(imageRes.data.imageUrl);
+      if (!imgRes.ok) throw new Error('Could not download the receipt image. Please try again.');
+      const blob = await imgRes.blob();
+      const file = new File([blob], `receipt-${order.orderId}.png`, { type: 'image/png' });
+
+      if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
+        // Can't call navigator.share() here — see the comment on
+        // receiptSharePayload above. Stash the prepared file/text; the
+        // "Tap to Send via WhatsApp" button's own click handler calls
+        // navigator.share() synchronously with no awaits before it.
+        setReceiptSharePayload({ file, text });
+      } else {
+        const downloadUrl = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(downloadUrl);
+        window.open(notifRes.data.whatsappUrl, '_blank');
+        setReceiptShareFallback(true);
+      }
+    } catch (err: any) {
+      if (err?.errorCode === 'WHATSAPP_RECEIPT_DISABLED') {
+        setReceiptShareError('WhatsApp receipts are turned off for your account.');
+      } else {
+        setReceiptShareError(err.message || 'Could not share the receipt. Please try again.');
+      }
+    } finally {
+      setReceiptSharing(false);
+    }
+  }, []);
+
+  const confirmReceiptShare = useCallback(() => {
+    if (!receiptSharePayload) return;
+    const { file, text } = receiptSharePayload;
+    navigator
+      .share({ files: [file], text })
+      .then(() => setReceiptSharePayload(null))
+      .catch((err: any) => {
+        // The user dismissing the native share sheet themselves throws
+        // AbortError — not a real failure. Keep the prepared payload so
+        // they can just tap "Tap to Send" again without re-fetching.
+        if (err?.name !== 'AbortError') {
+          setReceiptShareError(err.message || 'Could not share the receipt. Please try again.');
+        }
+      });
+  }, [receiptSharePayload]);
+
+  // Payment-reminder quick action (POST /api/notifications/whatsapp,
+  // template: 'PAYMENT_REMINDER') — keyed by orderId so multiple cards can
+  // be in-flight/erroring independently. On success, opens the returned
+  // whatsappUrl the same way every other WhatsApp deep link in this app is
+  // opened (window.open(..., '_blank')).
+  const [sendingReminderId, setSendingReminderId] = useState<string | null>(null);
+  const [reminderErrors, setReminderErrors] = useState<Record<string, string>>({});
+
+  const sendPaymentReminder = useCallback((orderId: string) => {
+    setReminderErrors((prev) => {
+      if (!(orderId in prev)) return prev;
+      const next = { ...prev };
+      delete next[orderId];
+      return next;
+    });
+    setSendingReminderId(orderId);
+    api
+      .post<{ success: boolean; data: { whatsappUrl: string } }>('/api/notifications/whatsapp', {
+        orderId,
+        template: 'PAYMENT_REMINDER',
+      })
+      .then((res) => {
+        window.open(res.data.whatsappUrl, '_blank');
+      })
+      .catch((err: any) => {
+        setReminderErrors((prev) => ({ ...prev, [orderId]: err.message || 'Could not send reminder. Please try again.' }));
+      })
+      .finally(() => setSendingReminderId(null));
   }, []);
 
   // New Order Form state — real POST /api/orders payload shape:
@@ -1610,34 +1744,56 @@ export default function Webapp() {
                       )}
 
                       {!dashboardLoading &&
-                        dashboardSummary?.todayOrders.map((o) => (
-                          <div
-                            key={o.id}
-                            className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
-                            onClick={() => openOrderDetail(o.orderNumber)}
-                          >
-                            <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
-                              🎂
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.orderNumber}</h4>
-                              <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
-                                <span className="text-[var(--accent)] font-semibold">{o.status}</span> • ₹{o.totalPrice.toLocaleString('en-IN')}
-                              </p>
-                            </div>
-                            <div className="flex-shrink-0">
-                              {o.balanceDue > 0 ? (
-                                <span className="bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-[var(--border)]">
-                                  ₹{o.balanceDue.toLocaleString('en-IN')} Due
-                                </span>
-                              ) : (
-                                <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
-                                  Fully Paid
-                                </span>
+                        dashboardSummary?.todayOrders.map((o) => {
+                          const paymentStatus = derivePaymentStatus(o.totalPrice, o.balanceDue);
+                          return (
+                            <div key={o.id} className="flex flex-col gap-2">
+                              <div
+                                className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                                onClick={() => openOrderDetail(o.orderNumber)}
+                              >
+                                <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
+                                  🎂
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.orderNumber}</h4>
+                                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                                    <span className="text-[var(--accent)] font-semibold">{o.status}</span> • ₹{o.totalPrice.toLocaleString('en-IN')}
+                                  </p>
+                                </div>
+                                <div className="flex-shrink-0 flex flex-col items-end gap-1.5">
+                                  {paymentStatus === 'Paid' ? (
+                                    <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
+                                      Fully Paid
+                                    </span>
+                                  ) : (
+                                    <>
+                                      <span className={`text-[10px] font-bold px-2.5 py-1.5 rounded-full border whitespace-nowrap ${paymentStatus === 'Unpaid'
+                                        ? 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border-red-200/50'
+                                        : 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200/50'
+                                        }`}>
+                                        {paymentStatus} • ₹{o.balanceDue.toLocaleString('en-IN')}
+                                      </span>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); sendPaymentReminder(o.id); }}
+                                        disabled={sendingReminderId === o.id}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                                      >
+                                        <Send size={11} />
+                                        {sendingReminderId === o.id ? 'Sending…' : 'Remind'}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                              {reminderErrors[o.id] && (
+                                <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                  <AlertCircle size={12} /> {reminderErrors[o.id]}
+                                </div>
                               )}
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                     </div>
                   </div>
 
@@ -1663,35 +1819,57 @@ export default function Webapp() {
                       </div>
 
                       <div className="flex flex-col gap-4">
-                        {dashboardSummary.upcomingOrders.orders.map((o) => (
-                          <div
-                            key={o.id}
-                            className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
-                            onClick={() => openOrderDetail(o.orderNumber)}
-                          >
-                            <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
-                              🎂
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName} — {o.cakeCategory}</h4>
-                              <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
-                                {new Date(`${o.deliveryDate}T00:00:00`).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
-                                {o.deliveryTime ? ` • ${o.deliveryTime}` : ''} • <span className="text-[var(--accent)] font-semibold">{o.status}</span>
-                              </p>
-                            </div>
-                            <div className="flex-shrink-0">
-                              {o.balanceDue > 0 ? (
-                                <span className="bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-[var(--border)]">
-                                  ₹{o.balanceDue.toLocaleString('en-IN')} Due
-                                </span>
-                              ) : (
-                                <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
-                                  Fully Paid
-                                </span>
+                        {dashboardSummary.upcomingOrders.orders.map((o) => {
+                          const paymentStatus = derivePaymentStatus(o.totalPrice, o.balanceDue);
+                          return (
+                            <div key={o.id} className="flex flex-col gap-2">
+                              <div
+                                className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                                onClick={() => openOrderDetail(o.orderNumber)}
+                              >
+                                <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
+                                  🎂
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName} — {o.cakeCategory}</h4>
+                                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                                    {new Date(`${o.deliveryDate}T00:00:00`).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+                                    {o.deliveryTime ? ` • ${o.deliveryTime}` : ''} • <span className="text-[var(--accent)] font-semibold">{o.status}</span>
+                                  </p>
+                                </div>
+                                <div className="flex-shrink-0 flex flex-col items-end gap-1.5">
+                                  {paymentStatus === 'Paid' ? (
+                                    <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
+                                      Fully Paid
+                                    </span>
+                                  ) : (
+                                    <>
+                                      <span className={`text-[10px] font-bold px-2.5 py-1.5 rounded-full border whitespace-nowrap ${paymentStatus === 'Unpaid'
+                                        ? 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border-red-200/50'
+                                        : 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200/50'
+                                        }`}>
+                                        {paymentStatus} • ₹{o.balanceDue.toLocaleString('en-IN')}
+                                      </span>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); sendPaymentReminder(o.id); }}
+                                        disabled={sendingReminderId === o.id}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                                      >
+                                        <Send size={11} />
+                                        {sendingReminderId === o.id ? 'Sending…' : 'Remind'}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                              {reminderErrors[o.id] && (
+                                <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                  <AlertCircle size={12} /> {reminderErrors[o.id]}
+                                </div>
                               )}
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -1774,50 +1952,75 @@ export default function Webapp() {
                     )}
 
                     {!ordersLoading &&
-                      ordersList.map((o) => (
-                        <div
-                          key={o.orderId}
-                          onClick={() => openOrderDetail(o.orderNumber)}
-                          className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm hover:shadow-md transition-all cursor-pointer flex flex-col justify-between min-h-[170px] hover:border-[var(--accent)]/30"
-                        >
-                          <div>
-                            <div className="flex justify-between items-start mb-3">
-                              <span className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">{o.orderNumber}</span>
-                              <div className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)] font-medium">
-                                <CalendarIcon size={12} />
-                                <span>{o.deliveryDate}</span>
+                      ordersList.map((o) => {
+                        const paymentStatus = derivePaymentStatus(o.totalPrice, o.balanceDue);
+                        return (
+                          <div key={o.orderId} className="flex flex-col gap-2">
+                            <div
+                              onClick={() => openOrderDetail(o.orderNumber)}
+                              className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm hover:shadow-md transition-all cursor-pointer flex flex-col justify-between min-h-[170px] hover:border-[var(--accent)]/30"
+                            >
+                              <div>
+                                <div className="flex justify-between items-start mb-3">
+                                  <span className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">{o.orderNumber}</span>
+                                  <div className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)] font-medium">
+                                    <CalendarIcon size={12} />
+                                    <span>{o.deliveryDate}</span>
+                                  </div>
+                                </div>
+
+                                <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.customerName}</h3>
+                                <p className="text-xs text-[var(--text-secondary)]">{o.phone || 'No phone on file'}</p>
+                              </div>
+
+                              <div className="flex justify-between items-center pt-4 mt-4 border-t border-[var(--border)]/50 gap-2 flex-wrap">
+                                <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10.5px] font-bold ${o.status === 'Pending' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border border-[var(--border)]' :
+                                  o.status === 'Confirmed' ? 'bg-blue-50 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 border border-blue-200/50' :
+                                    o.status === 'In Progress' ? 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50' :
+                                      o.status === 'Ready' ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/50' :
+                                        o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
+                                          'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400'
+                                  }`}>
+                                  <span className="w-1.5 h-1.5 bg-current rounded-full"></span>
+                                  {o.status}
+                                </span>
+
+                                <div className="flex items-center gap-2">
+                                  {paymentStatus !== 'Paid' && (
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); sendPaymentReminder(o.orderId); }}
+                                      disabled={sendingReminderId === o.orderId}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[10.5px] font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                                    >
+                                      <Send size={12} />
+                                      {sendingReminderId === o.orderId ? 'Sending…' : 'Remind'}
+                                    </button>
+                                  )}
+
+                                  {paymentStatus === 'Paid' ? (
+                                    <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10.5px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100 flex items-center gap-1">
+                                      <CheckCircle2 size={12} />
+                                      Fully Paid
+                                    </span>
+                                  ) : (
+                                    <span className={`text-[10.5px] font-bold px-2.5 py-1.5 rounded-full border flex items-center gap-1 whitespace-nowrap ${paymentStatus === 'Unpaid'
+                                      ? 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border-red-200/50'
+                                      : 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200/50'
+                                      }`}>
+                                      {paymentStatus} • ₹{o.balanceDue.toLocaleString('en-IN')}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             </div>
-
-                            <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.customerName}</h3>
-                            <p className="text-xs text-[var(--text-secondary)]">{o.phone || 'No phone on file'}</p>
-                          </div>
-
-                          <div className="flex justify-between items-center pt-4 mt-4 border-t border-[var(--border)]/50">
-                            <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10.5px] font-bold ${o.status === 'Pending' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border border-[var(--border)]' :
-                              o.status === 'Confirmed' ? 'bg-blue-50 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 border border-blue-200/50' :
-                                o.status === 'In Progress' ? 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50' :
-                                  o.status === 'Ready' ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/50' :
-                                    o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
-                                      'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400'
-                              }`}>
-                              <span className="w-1.5 h-1.5 bg-current rounded-full"></span>
-                              {o.status}
-                            </span>
-
-                            {o.balanceDue > 0 ? (
-                              <span className="bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 text-[10.5px] font-bold px-2.5 py-1.5 rounded-full border border-[var(--border)] flex items-center gap-1">
-                                ₹{o.balanceDue.toLocaleString('en-IN')} Due
-                              </span>
-                            ) : (
-                              <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10.5px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100 flex items-center gap-1">
-                                <CheckCircle2 size={12} />
-                                Fully Paid
-                              </span>
+                            {reminderErrors[o.orderId] && (
+                              <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                <AlertCircle size={12} /> {reminderErrors[o.orderId]}
+                              </div>
                             )}
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                   </div>
 
                   {/* Pagination — added since real data isn't bounded like the mock array was */}
@@ -3109,7 +3312,13 @@ export default function Webapp() {
                       <div className="flex-1 flex flex-col animate-fadeIn">
                         <div className="flex justify-between items-center mb-6">
                           <button
-                            onClick={() => { setActiveSheet('none'); setSelectedOrderDetail(null); }}
+                            onClick={() => {
+                              setActiveSheet('none');
+                              setSelectedOrderDetail(null);
+                              setReceiptShareError(null);
+                              setReceiptShareFallback(false);
+                              setReceiptSharePayload(null);
+                            }}
                             className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
                           >
                             <X size={20} />
@@ -3195,6 +3404,51 @@ export default function Webapp() {
                               <div className="flex justify-between text-xs py-1 border-t border-[var(--border)]/50 mt-1 pt-2"><span className="text-[var(--text-secondary)]">Balance Due</span><span className="font-bold text-[var(--accent)]">₹{selectedOrderDetail.payment.balanceDue.toLocaleString('en-IN')}</span></div>
                               <span className="inline-block mt-2 text-[10px] font-bold px-2.5 py-1 rounded-full bg-neutral-50 dark:bg-neutral-900 border border-[var(--border)]">{selectedOrderDetail.payment.paymentStatus}</span>
                             </div>
+
+                            {/* Share Receipt — only shown when the baker has
+                                whatsappReceiptEnabled on their profile; the
+                                403 WHATSAPP_RECEIPT_DISABLED the backend
+                                would otherwise return is a backstop, not the
+                                primary gate. */}
+                            {bakerProfile?.payment.whatsappReceiptEnabled && (
+                              <div className="flex flex-col gap-2">
+                                {receiptSharePayload ? (
+                                  <button
+                                    onClick={confirmReceiptShare}
+                                    className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-2xl text-xs font-bold border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer animate-pulse"
+                                  >
+                                    <Send size={14} /> Tap to Send via WhatsApp
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => prepareReceiptShare({ id: selectedOrderDetail.id, orderId: selectedOrderDetail.orderId })}
+                                    disabled={receiptSharing}
+                                    className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-2xl text-xs font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                                  >
+                                    {receiptSharing ? (
+                                      <>
+                                        <span className="w-3.5 h-3.5 border-2 border-emerald-700/30 dark:border-emerald-400/30 border-t-emerald-700 dark:border-t-emerald-400 rounded-full animate-spin" />
+                                        Preparing Receipt…
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Share2 size={14} /> Share Receipt
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                                {receiptShareFallback && (
+                                  <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200/50 text-blue-700 dark:text-blue-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                    <Download size={12} /> Image downloaded — attach it in WhatsApp to send.
+                                  </div>
+                                )}
+                                {receiptShareError && (
+                                  <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                    <AlertCircle size={12} /> {receiptShareError}
+                                  </div>
+                                )}
+                              </div>
+                            )}
 
                             {selectedOrderDetail.customFields && selectedOrderDetail.customFields.length > 0 && (
                               <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
