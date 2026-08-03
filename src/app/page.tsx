@@ -9,7 +9,8 @@ import {
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
-  UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy
+  UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy,
+  Share2, Download
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -315,6 +316,27 @@ export default function Webapp() {
   const [orderDetailLoading, setOrderDetailLoading] = useState(false);
   const [orderDetailError, setOrderDetailError] = useState<string | null>(null);
 
+  // Branded receipt-image share (Order Detail screen) — two sequential
+  // backend calls (caption text via the existing /notifications/whatsapp
+  // endpoint keyed by the order's UUID `id`, then the branded PNG via the
+  // new /receipt-image endpoint keyed by the display `orderId`) followed
+  // by a fetch of the resulting signed image URL. navigator.share's file
+  // support is device/browser-dependent — can only be truly verified on a
+  // real phone in real WhatsApp, not in a desktop browser — so this always
+  // has a manual download + wa.me fallback for when it's unavailable.
+  //
+  // navigator.share() must run synchronously inside a live user-gesture —
+  // confirmed live (desktop Chrome) that calling it after the two awaited
+  // network round-trips above throws "Must be handling a user gesture",
+  // because that async work (image generation alone ran ~2.5s) outlasts
+  // the browser's activation window. So this is a two-tap flow: the first
+  // tap fetches everything and stores it in receiptSharePayload; a second,
+  // fresh tap calls navigator.share() with no awaits before it.
+  const [receiptSharing, setReceiptSharing] = useState(false);
+  const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
+  const [receiptShareFallback, setReceiptShareFallback] = useState(false);
+  const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; text: string } | null>(null);
+
   const openCustomerProfile = useCallback((customerId: string) => {
     setSelectedOrderDetail(null);
     setSelectedCustomerProfile(null);
@@ -332,6 +354,9 @@ export default function Webapp() {
     setSelectedOrderDetail(null);
     setSelectedCustomerProfile(null);
     setOrderDetailError(null);
+    setReceiptShareError(null);
+    setReceiptShareFallback(false);
+    setReceiptSharePayload(null);
     setActiveSheet('customer-profile');
     setOrderDetailLoading(true);
     api
@@ -340,6 +365,73 @@ export default function Webapp() {
       .catch((err: any) => setOrderDetailError(err.message || 'Failed to load order details.'))
       .finally(() => setOrderDetailLoading(false));
   }, []);
+
+  const prepareReceiptShare = useCallback(async (order: { id: string; orderId: string }) => {
+    setReceiptShareError(null);
+    setReceiptShareFallback(false);
+    setReceiptSharePayload(null);
+    setReceiptSharing(true);
+    try {
+      const notifRes = await api.post<{ success: boolean; data: { whatsappUrl: string } }>(
+        '/api/notifications/whatsapp',
+        { orderId: order.id, template: 'RECEIPT' }
+      );
+      const text = new URL(notifRes.data.whatsappUrl).searchParams.get('text') || '';
+
+      const imageRes = await api.post<{ success: boolean; data: { imageUrl: string } }>(
+        `/api/orders/${order.orderId}/receipt-image`,
+        {}
+      );
+
+      const imgRes = await fetch(imageRes.data.imageUrl);
+      if (!imgRes.ok) throw new Error('Could not download the receipt image. Please try again.');
+      const blob = await imgRes.blob();
+      const file = new File([blob], `receipt-${order.orderId}.png`, { type: 'image/png' });
+
+      if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
+        // Can't call navigator.share() here — see the comment on
+        // receiptSharePayload above. Stash the prepared file/text; the
+        // "Tap to Send via WhatsApp" button's own click handler calls
+        // navigator.share() synchronously with no awaits before it.
+        setReceiptSharePayload({ file, text });
+      } else {
+        const downloadUrl = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(downloadUrl);
+        window.open(notifRes.data.whatsappUrl, '_blank');
+        setReceiptShareFallback(true);
+      }
+    } catch (err: any) {
+      if (err?.errorCode === 'WHATSAPP_RECEIPT_DISABLED') {
+        setReceiptShareError('WhatsApp receipts are turned off for your account.');
+      } else {
+        setReceiptShareError(err.message || 'Could not share the receipt. Please try again.');
+      }
+    } finally {
+      setReceiptSharing(false);
+    }
+  }, []);
+
+  const confirmReceiptShare = useCallback(() => {
+    if (!receiptSharePayload) return;
+    const { file, text } = receiptSharePayload;
+    navigator
+      .share({ files: [file], text })
+      .then(() => setReceiptSharePayload(null))
+      .catch((err: any) => {
+        // The user dismissing the native share sheet themselves throws
+        // AbortError — not a real failure. Keep the prepared payload so
+        // they can just tap "Tap to Send" again without re-fetching.
+        if (err?.name !== 'AbortError') {
+          setReceiptShareError(err.message || 'Could not share the receipt. Please try again.');
+        }
+      });
+  }, [receiptSharePayload]);
 
   // Payment-reminder quick action (POST /api/notifications/whatsapp,
   // template: 'PAYMENT_REMINDER') — keyed by orderId so multiple cards can
@@ -3220,7 +3312,13 @@ export default function Webapp() {
                       <div className="flex-1 flex flex-col animate-fadeIn">
                         <div className="flex justify-between items-center mb-6">
                           <button
-                            onClick={() => { setActiveSheet('none'); setSelectedOrderDetail(null); }}
+                            onClick={() => {
+                              setActiveSheet('none');
+                              setSelectedOrderDetail(null);
+                              setReceiptShareError(null);
+                              setReceiptShareFallback(false);
+                              setReceiptSharePayload(null);
+                            }}
                             className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
                           >
                             <X size={20} />
@@ -3306,6 +3404,51 @@ export default function Webapp() {
                               <div className="flex justify-between text-xs py-1 border-t border-[var(--border)]/50 mt-1 pt-2"><span className="text-[var(--text-secondary)]">Balance Due</span><span className="font-bold text-[var(--accent)]">₹{selectedOrderDetail.payment.balanceDue.toLocaleString('en-IN')}</span></div>
                               <span className="inline-block mt-2 text-[10px] font-bold px-2.5 py-1 rounded-full bg-neutral-50 dark:bg-neutral-900 border border-[var(--border)]">{selectedOrderDetail.payment.paymentStatus}</span>
                             </div>
+
+                            {/* Share Receipt — only shown when the baker has
+                                whatsappReceiptEnabled on their profile; the
+                                403 WHATSAPP_RECEIPT_DISABLED the backend
+                                would otherwise return is a backstop, not the
+                                primary gate. */}
+                            {bakerProfile?.payment.whatsappReceiptEnabled && (
+                              <div className="flex flex-col gap-2">
+                                {receiptSharePayload ? (
+                                  <button
+                                    onClick={confirmReceiptShare}
+                                    className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-2xl text-xs font-bold border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer animate-pulse"
+                                  >
+                                    <Send size={14} /> Tap to Send via WhatsApp
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => prepareReceiptShare({ id: selectedOrderDetail.id, orderId: selectedOrderDetail.orderId })}
+                                    disabled={receiptSharing}
+                                    className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-2xl text-xs font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                                  >
+                                    {receiptSharing ? (
+                                      <>
+                                        <span className="w-3.5 h-3.5 border-2 border-emerald-700/30 dark:border-emerald-400/30 border-t-emerald-700 dark:border-t-emerald-400 rounded-full animate-spin" />
+                                        Preparing Receipt…
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Share2 size={14} /> Share Receipt
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                                {receiptShareFallback && (
+                                  <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200/50 text-blue-700 dark:text-blue-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                    <Download size={12} /> Image downloaded — attach it in WhatsApp to send.
+                                  </div>
+                                )}
+                                {receiptShareError && (
+                                  <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                    <AlertCircle size={12} /> {receiptShareError}
+                                  </div>
+                                )}
+                              </div>
+                            )}
 
                             {selectedOrderDetail.customFields && selectedOrderDetail.customFields.length > 0 && (
                               <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
