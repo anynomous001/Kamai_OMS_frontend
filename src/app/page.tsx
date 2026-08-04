@@ -293,7 +293,7 @@ export default function Webapp() {
 
   // Bottom Sheet/Modal overlays
   const [activeSheet, setActiveSheet] = useState<
-    'none' | 'new-order' | 'customer-profile' | 'edit-profile' |
+    'none' | 'new-order' | 'edit-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
     'subscription-status' | 'help-support' | 'legal-policies' |
     'my-menu' | 'add-edit-menu-item' | 'share-menu'
@@ -520,6 +520,163 @@ export default function Webapp() {
   // defaultAdvancePercentage-based suggestion (below) only pre-fills the
   // field and never clobbers a value the baker deliberately entered.
   const [newOrderAdvanceTouched, setNewOrderAdvanceTouched] = useState(false);
+
+  // Edit Order form — reuses the New Order Form's field shape/UI, pre-filled
+  // from the currently open Order Detail (GET /api/orders/:orderNumber)
+  // instead of blank. PUT /api/orders/:orderNumber's UpdateOrderBodySchema
+  // is NOT identical to CreateOrderPayloadSchema: notably `customer.phone`
+  // requires a strict 10-digit Indian mobile format on update (Create only
+  // requires a non-empty string), and Update has no paymentMethod/
+  // forceConfirm fields at all — so the "Advance Collected Via" selector
+  // from New Order is intentionally omitted here rather than kept as a
+  // control that would silently do nothing. referencePhotoUrl/internalNotes/
+  // customInstructions/customFields aren't exposed by the New Order Form's
+  // fields either, but PUT is a full-replacement — these are carried
+  // forward unchanged from the loaded order rather than wiped.
+  const [editOrderForm, setEditOrderForm] = useState(getDefaultNewOrderForm());
+  const [editOrderNumber, setEditOrderNumber] = useState<string | null>(null);
+  const [editOrderPassthrough, setEditOrderPassthrough] = useState<{
+    referencePhotoUrl: string | null;
+    internalNotes: string;
+    customInstructions: string;
+    customFields: { label: string; value: string }[];
+  }>({ referencePhotoUrl: null, internalNotes: '', customInstructions: '', customFields: [] });
+  const [editOrderSubmitting, setEditOrderSubmitting] = useState(false);
+  const [editOrderError, setEditOrderError] = useState<string | null>(null);
+
+  const openEditOrder = useCallback(() => {
+    const d = selectedOrderDetail;
+    if (!d) return;
+    const weight = d.cake.weightInPounds;
+    const weightStr = weight !== null && weight !== undefined ? String(weight) : '';
+    const matchesPreset = (WEIGHT_PRESETS_LB as readonly string[]).includes(weightStr);
+    setEditOrderForm({
+      customerName: d.customer.name || '',
+      phone: d.customer.phone || '',
+      address: d.customer.address || '',
+      cakeCategory: d.cake.category || CAKE_CATEGORIES[0],
+      flavour: d.cake.flavour || CAKE_FLAVOURS[0],
+      weightPreset: matchesPreset ? (weightStr as (typeof WEIGHT_PRESETS_LB)[number]) : 'custom',
+      weightCustom: matchesPreset ? '' : weightStr,
+      quantity: d.cake.quantity !== null && d.cake.quantity !== undefined ? String(d.cake.quantity) : '',
+      occasion: d.occasion || '',
+      deliveryType: d.delivery.type === 'delivery' ? 'Delivery' : 'Pickup',
+      date: d.delivery.date || new Date().toISOString().slice(0, 10),
+      time: d.delivery.time || '',
+      deliveryCharge: d.delivery.charge ? String(d.delivery.charge) : '',
+      totalAmount: d.payment.totalPrice != null ? String(d.payment.totalPrice) : '',
+      advanceAmount: d.payment.advancePaid != null ? String(d.payment.advancePaid) : '',
+      paymentMethod: 'CASH',
+    });
+    setEditOrderNumber(d.orderId);
+    setEditOrderPassthrough({
+      referencePhotoUrl: d.referencePhotoUrl ?? null,
+      internalNotes: d.internalNotes ?? '',
+      customInstructions: d.customInstructions ?? '',
+      customFields: d.customFields ?? [],
+    });
+    setEditOrderError(null);
+    setActiveSheet('edit-order');
+  }, [selectedOrderDetail, CAKE_CATEGORIES, CAKE_FLAVOURS, WEIGHT_PRESETS_LB]);
+
+  const handleUpdateOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEditOrderError(null);
+
+    if (!editOrderNumber) return;
+
+    if (!editOrderForm.customerName.trim()) {
+      setEditOrderError('Customer name is required.');
+      return;
+    }
+    const trimmedPhone = editOrderForm.phone.trim();
+    // UpdateOrderBodySchema requires customer.phone to match
+    // /^[6-9]\d{9}$/ when present — stricter than Create's plain
+    // non-empty-string check, so this can't reuse handleCreateOrder's
+    // validation as-is.
+    if (trimmedPhone && !/^[6-9]\d{9}$/.test(trimmedPhone)) {
+      setEditOrderError('Phone number must be a valid 10-digit Indian mobile number (e.g. 9876543210).');
+      return;
+    }
+    const total = parseFloat(editOrderForm.totalAmount);
+    if (!total || total <= 0) {
+      setEditOrderError('Total amount must be greater than ₹0.');
+      return;
+    }
+    const advance = parseFloat(editOrderForm.advanceAmount || '0');
+    if (advance > total) {
+      setEditOrderError('Advance received cannot exceed the total amount.');
+      return;
+    }
+    if (!editOrderForm.date) {
+      setEditOrderError('Delivery date is required.');
+      return;
+    }
+
+    let weightInPounds: number | undefined;
+    if (editOrderForm.weightPreset === 'custom') {
+      const w = parseFloat(editOrderForm.weightCustom);
+      if (!w || w <= 0) {
+        setEditOrderError('Enter a valid custom weight in pounds.');
+        return;
+      }
+      weightInPounds = w;
+    } else {
+      weightInPounds = parseFloat(editOrderForm.weightPreset);
+    }
+
+    setEditOrderSubmitting(true);
+    try {
+      await api.put<{ success: boolean; data: { balanceDue: number; paymentStatus: string } }>(
+        `/api/orders/${editOrderNumber}`,
+        {
+          customer: {
+            name: editOrderForm.customerName.trim(),
+            phone: trimmedPhone || null,
+            address: editOrderForm.address.trim() || undefined,
+          },
+          cake: {
+            category: editOrderForm.cakeCategory,
+            flavour: editOrderForm.flavour,
+            weightInPounds,
+            quantity: editOrderForm.quantity ? Number(editOrderForm.quantity) : undefined,
+          },
+          occasion: editOrderForm.occasion.trim() || undefined,
+          customInstructions: editOrderPassthrough.customInstructions || undefined,
+          delivery: {
+            type: editOrderForm.deliveryType === 'Delivery' ? 'delivery' : 'pickup',
+            date: editOrderForm.date,
+            time: editOrderForm.time || undefined,
+            charge:
+              editOrderForm.deliveryType === 'Delivery' && editOrderForm.deliveryCharge
+                ? Number(editOrderForm.deliveryCharge)
+                : undefined,
+          },
+          payment: {
+            totalPrice: total,
+            advancePaid: advance,
+          },
+          referencePhotoUrl: editOrderPassthrough.referencePhotoUrl,
+          internalNotes: editOrderPassthrough.internalNotes || undefined,
+          customFields: editOrderPassthrough.customFields.length > 0 ? editOrderPassthrough.customFields : undefined,
+        },
+      );
+
+      // Refresh every screen that reads this order's data — mirrors
+      // handleCreateOrder's explicit refresh of both the dashboard and
+      // orders list (rather than only the screen the sheet was opened
+      // from), the same pattern used to fix Share My Menu's staleness bug.
+      // openOrderDetail re-fetches the full detail (the PUT response only
+      // returns a partial shape) and re-opens the sheet with fresh data.
+      fetchDashboardSummary();
+      fetchOrdersList();
+      openOrderDetail(editOrderNumber);
+    } catch (err: any) {
+      setEditOrderError(err.message || 'Failed to update order.');
+    } finally {
+      setEditOrderSubmitting(false);
+    }
+  };
 
   // Expense form state
   // Real investment/expense-ledger form fields — shape genuinely differs
@@ -1609,13 +1766,18 @@ export default function Webapp() {
 
                 <div
                   onClick={() => setActiveTab('settings')}
-                  className="w-10 h-10 rounded-full overflow-hidden cursor-pointer"
+                  className="w-10 h-10 rounded-full overflow-hidden border border-[var(--border)] flex items-center justify-center bg-[var(--surface)] text-sm font-bold text-[var(--text-secondary)] cursor-pointer"
                 >
-                  <img
-                    src="https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=100&fit=crop&q=80"
-                    alt="Avatar"
-                    className="w-full h-full object-cover"
-                  />
+                  {bakerProfile?.business.logoUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={bakerProfile.business.logoUrl}
+                      alt="Avatar"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    (bakerProfile?.business.ownerName || bakerProfile?.business.businessName || '?').charAt(0)
+                  )}
                 </div>
               </div>
             </div>
@@ -3301,6 +3463,250 @@ export default function Webapp() {
                       </form>
                     )}
 
+                    {/* SHEET: EDIT ORDER — real PUT /api/orders/:orderNumber, see
+                        handleUpdateOrder. Reuses New Order Form's field layout,
+                        pre-filled via openEditOrder from the currently open
+                        Order Detail. No "Advance Collected Via" selector here —
+                        UpdateOrderBodySchema has no paymentMethod field at all,
+                        so keeping that control would silently do nothing. */}
+                    {activeSheet === 'edit-order' && (
+                      <form onSubmit={handleUpdateOrder} className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                          <button type="button" onClick={() => setActiveSheet('customer-profile')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">Edit Order</h3>
+                          <span className="w-8" />
+                        </div>
+
+                        <div className="flex flex-col gap-6 overflow-y-auto pb-4">
+                          {editOrderError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                              <AlertCircle size={13} /> {editOrderError}
+                            </div>
+                          )}
+
+                          {/* Sec 1: Customer details */}
+                          <div>
+                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              👤 1. Customer Details
+                            </h4>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                              <input
+                                type="text"
+                                placeholder="Customer Name"
+                                value={editOrderForm.customerName}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, customerName: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                                required
+                              />
+                              <input
+                                type="tel"
+                                placeholder="WhatsApp Number (e.g. 98765 43210)"
+                                value={editOrderForm.phone}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, phone: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                              />
+                            </div>
+                            <input
+                              type="text"
+                              placeholder="Delivery Address (optional)"
+                              value={editOrderForm.address}
+                              onChange={(e) => setEditOrderForm({ ...editOrderForm, address: e.target.value })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                            />
+                          </div>
+
+                          {/* Sec 2: Cake Details */}
+                          <div>
+                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              🎂 2. Cake & Production Details
+                            </h4>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                              <select
+                                value={editOrderForm.cakeCategory}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, cakeCategory: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
+                              >
+                                {/* The order's existing category may not be one of
+                                    the preset options (freeform on the backend) —
+                                    include it explicitly so the select doesn't
+                                    silently mismatch and submit the wrong value. */}
+                                {(CAKE_CATEGORIES.includes(editOrderForm.cakeCategory) ? CAKE_CATEGORIES : [editOrderForm.cakeCategory, ...CAKE_CATEGORIES]).map((c) => <option key={c} value={c}>{c}</option>)}
+                              </select>
+
+                              <select
+                                value={editOrderForm.flavour}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, flavour: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
+                              >
+                                {(CAKE_FLAVOURS.includes(editOrderForm.flavour) ? CAKE_FLAVOURS : [editOrderForm.flavour, ...CAKE_FLAVOURS]).map((f) => <option key={f} value={f}>{f}</option>)}
+                              </select>
+                            </div>
+
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1.5 block">Weight (lb)</label>
+                            <div className="flex gap-2 mb-2 flex-wrap">
+                              {WEIGHT_PRESETS_LB.map((w) => (
+                                <button
+                                  key={w}
+                                  type="button"
+                                  onClick={() => setEditOrderForm({ ...editOrderForm, weightPreset: w })}
+                                  className={`px-3.5 py-2 text-xs font-bold rounded-xl border transition-all cursor-pointer ${editOrderForm.weightPreset === w
+                                    ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
+                                    : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
+                                    }`}
+                                >
+                                  {w} lb
+                                </button>
+                              ))}
+                              <button
+                                type="button"
+                                onClick={() => setEditOrderForm({ ...editOrderForm, weightPreset: 'custom' })}
+                                className={`px-3.5 py-2 text-xs font-bold rounded-xl border transition-all cursor-pointer ${editOrderForm.weightPreset === 'custom'
+                                  ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
+                                  : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
+                                  }`}
+                              >
+                                Custom
+                              </button>
+                            </div>
+                            {editOrderForm.weightPreset === 'custom' && (
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0"
+                                placeholder="Custom weight (lb)"
+                                value={editOrderForm.weightCustom}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, weightCustom: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] font-bold mb-3"
+                                required
+                              />
+                            )}
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                              <input
+                                type="text"
+                                placeholder="Occasion (e.g. Birthday, optional)"
+                                value={editOrderForm.occasion}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, occasion: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder="Quantity (optional, e.g. 12)"
+                                value={editOrderForm.quantity}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, quantity: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Sec 3: Schedule */}
+                          <div>
+                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              📅 3. Delivery Schedule
+                            </h4>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                              <input
+                                type="date"
+                                value={editOrderForm.date}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, date: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none"
+                                required
+                              />
+                              <input
+                                type="time"
+                                value={editOrderForm.time}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, time: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                              />
+                            </div>
+
+                            <div className="flex gap-3">
+                              <button
+                                type="button"
+                                onClick={() => setEditOrderForm({ ...editOrderForm, deliveryType: 'Pickup' })}
+                                className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${editOrderForm.deliveryType === 'Pickup'
+                                  ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
+                                  : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
+                                  }`}
+                              >
+                                👜 Pickup
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditOrderForm({ ...editOrderForm, deliveryType: 'Delivery' })}
+                                className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${editOrderForm.deliveryType === 'Delivery'
+                                  ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
+                                  : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
+                                  }`}
+                              >
+                                🛵 Delivery
+                              </button>
+                            </div>
+                            {editOrderForm.deliveryType === 'Delivery' && (
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder="Delivery Charge (₹, optional)"
+                                value={editOrderForm.deliveryCharge}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, deliveryCharge: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] mt-3"
+                              />
+                            )}
+                          </div>
+
+                          {/* Sec 4: Payment */}
+                          <div>
+                            <h4 className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              ₹ 4. Payment
+                            </h4>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                              <input
+                                type="number"
+                                placeholder="Total Amount (₹)"
+                                value={editOrderForm.totalAmount}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, totalAmount: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] font-bold"
+                                required
+                              />
+                              <input
+                                type="number"
+                                placeholder="Advance Received (₹)"
+                                value={editOrderForm.advanceAmount}
+                                onChange={(e) => setEditOrderForm({ ...editOrderForm, advanceAmount: e.target.value })}
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] font-bold"
+                              />
+                            </div>
+
+                            <div className="flex justify-between items-center bg-[var(--background)] p-4 rounded-xl border border-[var(--border)] text-xs font-bold">
+                              <span>Balance to Collect:</span>
+                              <span className="text-base text-[var(--accent)]">
+                                ₹{(parseFloat(editOrderForm.totalAmount || '0') - parseFloat(editOrderForm.advanceAmount || '0')).toLocaleString('en-IN')}
+                              </span>
+                            </div>
+                          </div>
+
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={editOrderSubmitting}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-4 cursor-pointer"
+                        >
+                          {editOrderSubmitting ? (
+                            <>
+                              <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                              Saving...
+                            </>
+                          ) : (
+                            <>
+                              <Check size={16} /> Save Changes
+                            </>
+                          )}
+                        </button>
+                      </form>
+                    )}
+
                     {/* SHEET: ORDER DETAIL (real data, GET /api/orders/:orderNumber) —
                         reuses the same sheet slot as Customer Profile per
                         explicit decision, rather than a new screen. This is
@@ -3356,6 +3762,35 @@ export default function Webapp() {
                                 {selectedOrderDetail.occasion ? ` • ${selectedOrderDetail.occasion}` : ''}
                               </p>
                             </div>
+
+                            {/* Edit Order — hidden/disabled once the order is
+                                Delivered or Cancelled, mirroring the backend's
+                                own edit-lock (PUT /api/orders/:orderNumber
+                                returns 409 in that case) so the baker never
+                                fills out a whole form only to hit a conflict
+                                error on submit. */}
+                            {selectedOrderDetail.status === 'Delivered' || selectedOrderDetail.status === 'Cancelled' ? (
+                              <div className="flex flex-col gap-1">
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-2xl text-xs font-bold border border-[var(--border)] bg-neutral-50 dark:bg-neutral-900 text-[var(--text-secondary)] opacity-60 cursor-not-allowed"
+                                >
+                                  <Pencil size={14} /> Edit Order
+                                </button>
+                                <p className="text-[10.5px] text-[var(--text-secondary)] text-center">
+                                  {selectedOrderDetail.status} orders can no longer be edited.
+                                </p>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={openEditOrder}
+                                className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-2xl text-xs font-bold border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900 cursor-pointer"
+                              >
+                                <Pencil size={14} /> Edit Order
+                              </button>
+                            )}
 
                             <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
                               <h5 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">Customer</h5>
