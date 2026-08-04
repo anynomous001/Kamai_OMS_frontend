@@ -1766,13 +1766,18 @@ export default function Webapp() {
 
                 <div
                   onClick={() => setActiveTab('settings')}
-                  className="w-10 h-10 rounded-full overflow-hidden cursor-pointer"
+                  className="w-10 h-10 rounded-full overflow-hidden border border-[var(--border)] flex items-center justify-center bg-[var(--surface)] text-sm font-bold text-[var(--text-secondary)] cursor-pointer"
                 >
-                  <img
-                    src="https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=100&fit=crop&q=80"
-                    alt="Avatar"
-                    className="w-full h-full object-cover"
-                  />
+                  {bakerProfile?.business.logoUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={bakerProfile.business.logoUrl}
+                      alt="Avatar"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    (bakerProfile?.business.ownerName || bakerProfile?.business.businessName || '?').charAt(0)
+                  )}
                 </div>
               </div>
             </div>
