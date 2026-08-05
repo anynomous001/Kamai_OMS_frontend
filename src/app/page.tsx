@@ -10,10 +10,22 @@ import {
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
   UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy,
-  Share2, Download
+  Share2, Download, Store, Truck, Clock,
+  ArrowUpDown, ShoppingCart, Minus, MapPin, RotateCcw
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
+import {
+  fetchWholesalers, fetchCatalogue, fetchPolicies,
+  fetchCart, getDefaultVariant, getDisplayPrice, getDisplayUnitLabel, getCartSubtotal,
+  updateCartItemQuantity, removeCartItem, placeOrder, fetchOrderStatus, fetchBakerOrders,
+  haversineDistanceKm,
+} from '@/lib/marketplace/client';
+import { useAddToCart } from '@/lib/marketplace/useAddToCart';
+import type {
+  Wholesaler, WholesaleProduct, WholesalerPolicies, WholesaleCart,
+  PlaceOrderResponse, OrderStatusResponse, BakerOrderListItem, FulfilmentMode, OrderItem,
+} from '@/lib/marketplace/types';
 
 // --- REAL API RESPONSE SHAPES (per verified backend contract) ---
 interface DashboardTodayOrder {
@@ -164,6 +176,7 @@ interface RealMenuItem {
 }
 
 interface RealBakerProfile {
+  id: string;
   business: {
     businessName: string | null;
     ownerName: string | null;
@@ -260,15 +273,6 @@ const initialExpenses: Expense[] = [
   { id: 'E-5', item: 'Sprinkles & Decorations', amount: 220, date: 'Oct 20, 2023', category: 'Decoration' }
 ];
 
-const supplyProducts = [
-  { name: '10kg Dark Compound Chocolate', price: 2200, category: 'Chocolates', image: '🍫' },
-  { name: '10kg White Compound Chocolate', price: 2200, category: 'Chocolates', image: '🥚' },
-  { name: '10kg Milk Compound Chocolate', price: 2050, category: 'Chocolates', image: '🟫' },
-  { name: '5kg Cocoa Powder', price: 750, category: 'Chocolates', image: '📇' },
-  { name: '5kg Unsalted Butter', price: 1150, category: 'Dairy & Fats', image: '🧈' },
-  { name: '50 pcs Cake Boxes (10 inch)', price: 650, category: 'Packaging', image: '📦' }
-];
-
 export default function Webapp() {
   // --- BASE APP STATE ---
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -296,13 +300,20 @@ export default function Webapp() {
     'none' | 'new-order' | 'edit-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
     'subscription-status' | 'help-support' | 'legal-policies' |
-    'my-menu' | 'add-edit-menu-item' | 'share-menu'
+    'my-menu' | 'add-edit-menu-item' | 'share-menu' | 'supply-catalogue' | 'supply-cart' | 'supply-orders'
   >('none');
 
   // Business state — bakeryName/ownerName/phoneNumber/upiId/fssaiLicense/
   // defaultAdvance/autoSendReceipts mock state removed; all now sourced
   // from real bakerProfile (GET /api/baker/profile) and upiForm.
-  const [cartCount, setCartCount] = useState(3);
+  // Marketplace cart badge — real count, derived from the local cart
+  // (src/lib/marketplace/client.ts — there is no server-side cart in the
+  // wholesale API), refreshed after every add-to-cart.
+  const [cart, setCart] = useState<WholesaleCart | null>(null);
+  const cartCount = cart?.items.reduce((sum, item) => sum + item.quantity, 0) ?? 0;
+  const refreshCart = useCallback(() => {
+    return fetchCart().then(setCart);
+  }, []);
 
   // Database records
   const [expenses, setExpenses] = useState<Expense[]>(initialExpenses);
@@ -791,8 +802,354 @@ export default function Webapp() {
   const [selectedCustomerProfile, setSelectedCustomerProfile] = useState<RealCustomerProfile | null>(null);
   const [customerProfileLoading, setCustomerProfileLoading] = useState(false);
   const [customerProfileError, setCustomerProfileError] = useState<string | null>(null);
-  const [supplyTab, setSupplyTab] = useState('Chocolates');
+  // Supply Hub: supplier discovery (Screen 1). Reads through
+  // src/lib/marketplace/client.ts, which calls the real wholesale API
+  // via src/app/api/marketplace/* proxy routes.
+  const [wholesalers, setWholesalers] = useState<Wholesaler[]>([]);
+  const [wholesalersLoading, setWholesalersLoading] = useState(false);
+  const [wholesalersError, setWholesalersError] = useState<string | null>(null);
   const [supplySearch, setSupplySearch] = useState('');
+  // Device geolocation, passed to GET /wholesalers for server-side
+  // nearest-first sort. Both null if permission is denied/unavailable —
+  // the endpoint degrades gracefully to default order in that case, so
+  // there's no error state here, just an absence.
+  const [bakerLocation, setBakerLocation] = useState<{ lat: number; lng: number } | null>(null);
+  // Set when a baker taps "View Catalogue"; opens the 'supply-catalogue' sheet.
+  const [selectedWholesalerId, setSelectedWholesalerId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (position) => setBakerLocation({ lat: position.coords.latitude, lng: position.coords.longitude }),
+      () => setBakerLocation(null),
+      { timeout: 8000 }
+    );
+  }, []);
+
+  const fetchSupplyWholesalers = useCallback(() => {
+    setWholesalersLoading(true);
+    setWholesalersError(null);
+    fetchWholesalers(bakerLocation ? { lat: bakerLocation.lat, lng: bakerLocation.lng } : undefined)
+      .then(setWholesalers)
+      .catch((err: any) => setWholesalersError(err.message || 'Failed to load suppliers.'))
+      .finally(() => setWholesalersLoading(false));
+  }, [bakerLocation]);
+
+  // Supply Hub: supplier catalogue (Screen 2), rendered in the
+  // 'supply-catalogue' sheet, scoped to selectedWholesalerId. search/
+  // category/sort/inStockOnly are sent to the API as query params (the
+  // API filters/sorts server-side) rather than filtered client-side.
+  const [catalogueProducts, setCatalogueProducts] = useState<WholesaleProduct[]>([]);
+  // Unfiltered baseline, fetched once per wholesaler-open, used only to
+  // derive the full set of category chips (see catalogueCategories) -
+  // catalogueProducts itself is already server-filtered and would lose
+  // categories as soon as one is selected.
+  const [catalogueAllProducts, setCatalogueAllProducts] = useState<WholesaleProduct[]>([]);
+  const [catalogueLoading, setCatalogueLoading] = useState(false);
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  const [catalogueSearch, setCatalogueSearch] = useState('');
+  const [catalogueCategory, setCatalogueCategory] = useState<string>('All');
+  // Only ascending-by-price sort exists server-side (no descending, no
+  // "top rated" — see bakery-api-reference.md endpoint 2).
+  const [catalogueSort, setCatalogueSort] = useState<'Recommended' | 'Price: Low to High'>('Recommended');
+  const [catalogueInStockOnly, setCatalogueInStockOnly] = useState(false);
+  // Per-card add-to-cart feedback, independent of useAddToCart's single
+  // isAdding flag, so only the tapped card shows a spinner/checkmark.
+  const [addingProductId, setAddingProductId] = useState<string | null>(null);
+  const [justAddedProductId, setJustAddedProductId] = useState<string | null>(null);
+  const { addToCart: addProductToCart, reorder: reorderFromOrder } = useAddToCart();
+
+  const fetchSupplyCatalogue = useCallback(() => {
+    if (!selectedWholesalerId) return;
+    setCatalogueLoading(true);
+    setCatalogueError(null);
+    fetchCatalogue(selectedWholesalerId, {
+      search: catalogueSearch.trim() || undefined,
+      category: catalogueCategory !== 'All' ? catalogueCategory : undefined,
+      sort: catalogueSort === 'Price: Low to High' ? 'price' : undefined,
+      inStockOnly: catalogueInStockOnly,
+    })
+      .then(setCatalogueProducts)
+      .catch((err: any) => setCatalogueError(err.message || 'Failed to load catalogue.'))
+      .finally(() => setCatalogueLoading(false));
+  }, [selectedWholesalerId, catalogueSearch, catalogueCategory, catalogueSort, catalogueInStockOnly]);
+
+  useEffect(() => {
+    if (activeSheet !== 'supply-catalogue' || !selectedWholesalerId) return;
+    const handle = setTimeout(fetchSupplyCatalogue, catalogueSearch ? 300 : 0);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSheet, selectedWholesalerId, catalogueSearch, catalogueCategory, catalogueSort, catalogueInStockOnly]);
+
+  // Reset per-open, so a previous wholesaler's search/filters don't leak in.
+  // Also fetches the unfiltered category baseline once here.
+  useEffect(() => {
+    if (activeSheet === 'supply-catalogue' && selectedWholesalerId) {
+      setCatalogueSearch('');
+      setCatalogueCategory('All');
+      setCatalogueSort('Recommended');
+      setCatalogueInStockOnly(false);
+      setSelectedProductId(null);
+      fetchCatalogue(selectedWholesalerId).then(setCatalogueAllProducts).catch(() => setCatalogueAllProducts([]));
+    }
+  }, [activeSheet, selectedWholesalerId]);
+
+  // Supply Hub: product detail (Screen 3), a sub-view within the same
+  // 'supply-catalogue' sheet rather than its own activeSheet - non-null
+  // selectedProductId shows it in place of the catalogue list, with the
+  // header's close button stepping back to the list instead of exiting
+  // the sheet. Keeps everything inside one bottom-sheet container instead
+  // of stacking a second sheet on top, which nothing else in this app does.
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
+  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
+  const [productDetailQuantity, setProductDetailQuantity] = useState(1);
+  const [productDetailAdded, setProductDetailAdded] = useState(false);
+  const [selectedProductPolicies, setSelectedProductPolicies] = useState<WholesalerPolicies | null>(null);
+  const [selectedProductPoliciesLoading, setSelectedProductPoliciesLoading] = useState(false);
+
+  // Reset the size selection + quantity stepper whenever a different
+  // product is opened, defaulting to its cheapest variant (if any), and
+  // fetch that wholesaler's policies for the delivery/bulk-notice boxes.
+  useEffect(() => {
+    if (!selectedProductId) return;
+    const product = catalogueProducts.find((p) => p.id === selectedProductId);
+    setSelectedVariantId(product ? getDefaultVariant(product)?.id ?? null : null);
+    setProductDetailQuantity(1);
+    setProductDetailAdded(false);
+
+    if (product) {
+      setSelectedProductPoliciesLoading(true);
+      fetchPolicies(product.wholesalerId)
+        .then(setSelectedProductPolicies)
+        .catch(() => setSelectedProductPolicies(null))
+        .finally(() => setSelectedProductPoliciesLoading(false));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProductId]);
+
+  // Supply Hub: cart (Screen 4), its own top-level sheet since it's
+  // opened from the tab header's cart icon, not nested inside a
+  // wholesaler's catalogue like product detail is.
+  const [cartUpdatingKey, setCartUpdatingKey] = useState<string | null>(null);
+  const [cartPolicies, setCartPolicies] = useState<WholesalerPolicies | null>(null);
+  const [cartPoliciesLoading, setCartPoliciesLoading] = useState(false);
+
+  const handleCartQuantityChange = async (productId: string, variantId: string | null, quantity: number) => {
+    const key = `${productId}:${variantId ?? ''}`;
+    setCartUpdatingKey(key);
+    await updateCartItemQuantity(productId, variantId, quantity);
+    await refreshCart();
+    setCartUpdatingKey(null);
+  };
+
+  const handleCartRemoveItem = async (productId: string, variantId: string | null) => {
+    const key = `${productId}:${variantId ?? ''}`;
+    setCartUpdatingKey(key);
+    await removeCartItem(productId, variantId);
+    await refreshCart();
+    setCartUpdatingKey(null);
+  };
+
+  // Policies (min order amount, delivery charge) are wholesaler-specific
+  // and not part of the cart itself - fetch whenever the cart sheet opens
+  // with items in it, or the cart's wholesaler changes (e.g. after a
+  // forced switch).
+  useEffect(() => {
+    if (activeSheet !== 'supply-cart' || !cart?.wholesalerId) {
+      setCartPolicies(null);
+      return;
+    }
+    setCartPoliciesLoading(true);
+    fetchPolicies(cart.wholesalerId)
+      .then(setCartPolicies)
+      .catch(() => setCartPolicies(null))
+      .finally(() => setCartPoliciesLoading(false));
+  }, [activeSheet, cart?.wholesalerId]);
+
+  // Supply Hub: checkout (Screen 5), a sub-view within the 'supply-cart'
+  // sheet - same technique as product detail nesting inside the
+  // catalogue sheet, for the same reason: "back" from checkout should
+  // return to reviewing the cart, not exit the whole flow. A third
+  // sub-view (placedOrder set) shows a minimal order-placed confirmation,
+  // since there's no dedicated Order Confirmation/Orders-list screen for
+  // the baker to otherwise see that their order went through.
+  const [showCheckout, setShowCheckout] = useState(false);
+  const [checkoutFulfillment, setCheckoutFulfillment] = useState<'Delivery' | 'Pickup'>('Delivery');
+  const [checkoutAddress, setCheckoutAddress] = useState('');
+  const [checkoutInstructions, setCheckoutInstructions] = useState('');
+  const [checkoutSubmitting, setCheckoutSubmitting] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [placedOrder, setPlacedOrder] = useState<PlaceOrderResponse | null>(null);
+  // POST /orders' response has no wholesaler name/fulfilment/delivery-eta
+  // fields (see bakery-api-reference.md endpoint 4) - captured here from
+  // what's already in scope right before the cart clears, rather than
+  // invented after the fact.
+  const [placedOrderContext, setPlacedOrderContext] = useState<{
+    wholesalerName: string;
+    expectedDeliveryTime: string;
+    fulfilmentMode: FulfilmentMode;
+  } | null>(null);
+
+  const handlePlaceOrder = async () => {
+    if (!cart || !cart.wholesalerId || !bakerProfile) return;
+    if (checkoutFulfillment === 'Delivery' && !checkoutAddress.trim()) {
+      setCheckoutError('Enter a delivery address.');
+      return;
+    }
+    setCheckoutSubmitting(true);
+    setCheckoutError(null);
+    try {
+      const order = await placeOrder({
+        wholesalerId: cart.wholesalerId,
+        bakerId: bakerProfile.id,
+        buyerName: bakerProfile.business.businessName || bakerProfile.business.ownerName || 'Baker',
+        buyerContact: bakerProfile.business.phone || undefined,
+        fulfilmentMode: checkoutFulfillment === 'Delivery' ? 'DELIVERY' : 'PICKUP',
+        notes:
+          checkoutInstructions.trim() ||
+          (checkoutFulfillment === 'Delivery' ? checkoutAddress.trim() : undefined) ||
+          undefined,
+        items: cart.items.map((item) => ({
+          productId: item.product.id,
+          variantId: item.variant?.id,
+          quantity: item.quantity,
+        })),
+      });
+      setPlacedOrderContext({
+        wholesalerName: cartWholesaler?.businessName ?? 'the wholesaler',
+        expectedDeliveryTime: cartWholesaler?.expectedDeliveryTime ?? 'To be confirmed',
+        fulfilmentMode: checkoutFulfillment === 'Delivery' ? 'DELIVERY' : 'PICKUP',
+      });
+      setPlacedOrder(order);
+      refreshCart();
+    } catch (err: any) {
+      setCheckoutError(err.message || 'Could not place order.');
+    } finally {
+      setCheckoutSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showCheckout && cart?.wholesalerId) {
+      const wholesaler = wholesalers.find((w) => w.id === cart.wholesalerId);
+      setCheckoutFulfillment(wholesaler?.deliveryEnabled ? 'Delivery' : 'Pickup');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showCheckout]);
+
+  const resetCheckoutState = () => {
+    setShowCheckout(false);
+    setCheckoutAddress('');
+    setCheckoutInstructions('');
+    setCheckoutError(null);
+    setPlacedOrder(null);
+    setPlacedOrderContext(null);
+    setCheckoutFulfillment('Delivery');
+  };
+
+  const closeCartSheet = () => {
+    resetCheckoutState();
+    setCartUnavailableNotice(null);
+    setActiveSheet('none');
+  };
+
+  // Supply Hub: orders list (Screen 7). Global across wholesalers - a
+  // top-level sheet like Cart, reached from the Supply Hub header and
+  // from "View Order" on the order-success screen. Deliberately titled
+  // "My Wholesale Orders" rather than "Orders" to avoid colliding with
+  // the app's existing Orders tab, which is a different domain entirely
+  // (the baker's own customer sales orders, not purchases from wholesalers).
+  const [supplyOrders, setSupplyOrders] = useState<BakerOrderListItem[]>([]);
+  const [supplyOrdersLoading, setSupplyOrdersLoading] = useState(false);
+  const [supplyOrdersError, setSupplyOrdersError] = useState<string | null>(null);
+  const [supplyOrdersTab, setSupplyOrdersTab] = useState<'All' | 'Active' | 'Cancelled'>('All');
+  // Order Detail (Screen 8) - a sub-view within this same sheet, same
+  // reasoning as product-detail-in-catalogue and checkout-in-cart: "back"
+  // should return to the order list, not exit the whole sheet.
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [selectedOrderStatus, setSelectedOrderStatus] = useState<OrderStatusResponse | null>(null);
+  const [selectedOrderStatusLoading, setSelectedOrderStatusLoading] = useState(false);
+  const [selectedOrderStatusError, setSelectedOrderStatusError] = useState<string | null>(null);
+
+  const fetchSupplyOrders = useCallback(() => {
+    if (!bakerProfile) return;
+    setSupplyOrdersLoading(true);
+    setSupplyOrdersError(null);
+    fetchBakerOrders(bakerProfile.id)
+      .then(setSupplyOrders)
+      .catch((err: any) => setSupplyOrdersError(err.message || 'Failed to load orders.'))
+      .finally(() => setSupplyOrdersLoading(false));
+  }, [bakerProfile]);
+
+  useEffect(() => {
+    if (activeSheet === 'supply-orders') {
+      fetchSupplyOrders();
+      setSelectedOrderId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSheet]);
+
+  const fetchSelectedOrderStatus = useCallback(() => {
+    if (!selectedOrderId) return;
+    setSelectedOrderStatusLoading(true);
+    setSelectedOrderStatusError(null);
+    fetchOrderStatus(selectedOrderId)
+      .then(setSelectedOrderStatus)
+      .catch((err: any) => setSelectedOrderStatusError(err.message || 'Failed to load order status.'))
+      .finally(() => setSelectedOrderStatusLoading(false));
+  }, [selectedOrderId]);
+
+  useEffect(() => {
+    if (selectedOrderId) fetchSelectedOrderStatus();
+    else setSelectedOrderStatus(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOrderId]);
+
+  // Policies aren't part of any order response - fetched here only for
+  // real pickupLocation text on Pickup orders, using the wholesalerId
+  // already available from the orders list.
+  const [selectedOrderPolicies, setSelectedOrderPolicies] = useState<WholesalerPolicies | null>(null);
+
+  useEffect(() => {
+    const wholesalerId = supplyOrders.find((o) => o.id === selectedOrderId)?.wholesalerId;
+    if (!wholesalerId) {
+      setSelectedOrderPolicies(null);
+      return;
+    }
+    fetchPolicies(wholesalerId).then(setSelectedOrderPolicies).catch(() => setSelectedOrderPolicies(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOrderId]);
+
+  // Reorder (My Orders + Order Detail): rebuilds the cart from a past
+  // order's items against the current catalogue via useAddToCart's
+  // shared conflict-confirm flow, then always lands on Cart (never
+  // Checkout) so the baker reviews current prices/availability before
+  // confirming - see reorderItems in client.ts for the matching logic.
+  const [reorderingOrderId, setReorderingOrderId] = useState<string | null>(null);
+  // Shown on the Cart screen itself, not on the My Orders/Order Detail
+  // screen the Reorder button was tapped from - handleReorder navigates
+  // straight to Cart on any successful reorder, which would unmount a
+  // notice rendered on the originating screen before the baker ever saw
+  // it. Cleared on cart close (closeCartSheet) and at the start of every
+  // new reorder attempt.
+  const [cartUnavailableNotice, setCartUnavailableNotice] = useState<string[] | null>(null);
+
+  const handleReorder = async (orderId: string, wholesalerId: string, items: OrderItem[]) => {
+    setReorderingOrderId(orderId);
+    setCartUnavailableNotice(null);
+    const result = await reorderFromOrder(wholesalerId, items);
+    setReorderingOrderId(null);
+    if (!result) return;
+    refreshCart();
+    // Navigate to Cart whenever the reorder actually did something -
+    // including the all-unavailable case, so the notice below has
+    // somewhere to be seen instead of silently going nowhere.
+    setActiveSheet('supply-cart');
+    if (result.unavailable.length > 0) {
+      setCartUnavailableNotice(result.unavailable);
+    }
+  };
+
   // Real calendar data (GET /api/dashboard/calendar). calendarMonth is
   // YYYY-MM; selectedCalendarDate is YYYY-MM-DD, both real ISO forms —
   // replacing the mock's "Jul 26" style labels entirely.
@@ -971,6 +1328,34 @@ export default function Webapp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, activeTab, investmentsPage]);
+
+  useEffect(() => {
+    if (step === 'dashboard' && activeTab === 'supply') {
+      fetchSupplyWholesalers();
+      refreshCart();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, activeTab, bakerLocation]);
+
+  // Cycles the sort control on tap — no dropdown/menu component exists
+  // elsewhere in this app to reuse, so this stays a single button like
+  // the other Supply Hub toolbar controls rather than introducing one.
+  // Only two states now: the API has no descending-price or "top rated"
+  // sort (see bakery-api-reference.md endpoint 2).
+  const cycleCatalogueSort = () => {
+    setCatalogueSort((current) => (current === 'Recommended' ? 'Price: Low to High' : 'Recommended'));
+  };
+
+  const handleAddProductToCart = async (product: WholesaleProduct) => {
+    setAddingProductId(product.id);
+    const result = await addProductToCart(product, getDefaultVariant(product), 1);
+    setAddingProductId(null);
+    if (result) {
+      refreshCart();
+      setJustAddedProductId(product.id);
+      setTimeout(() => setJustAddedProductId((id) => (id === product.id ? null : id)), 1200);
+    }
+  };
 
   // Real menu items (GET /api/menu-items) — fetched whenever the "My Menu"
   // sheet opens, same trigger pattern as the Expenses tab above.
@@ -1551,6 +1936,93 @@ export default function Webapp() {
   };
 
   const totalCollectedThisMonth = expenses.reduce((sum, e) => sum + e.amount, 0);
+
+  // Search is client-side (the wholesaler-list endpoint takes no search
+  // param - only lat/lng). Sort/order is left exactly as the API
+  // returned it: nearest-first when bakerLocation was available at fetch
+  // time, default order otherwise - see bakery-api-reference.md endpoint
+  // 1. distanceKm is computed here purely for display (Haversine against
+  // two real coordinate pairs); the API doesn't return a distance value.
+  const filteredWholesalers = wholesalers
+    .filter((w) => w.businessName.toLowerCase().includes(supplySearch.toLowerCase()))
+    .map((w) => ({
+      ...w,
+      distanceKm:
+        bakerLocation && w.latitude != null && w.longitude != null
+          ? haversineDistanceKm(bakerLocation.lat, bakerLocation.lng, w.latitude, w.longitude)
+          : null,
+    }));
+
+  const selectedWholesaler = wholesalers.find((w) => w.id === selectedWholesalerId) ?? null;
+
+  // Categories offered as chips are derived from this wholesaler's full,
+  // unfiltered catalogue (catalogueAllProducts) — not from catalogueProducts,
+  // which is already server-filtered to the selected category and would
+  // otherwise make every other category chip disappear the moment one is
+  // picked. Different wholesalers use their own free-text category values
+  // (see bakery-api-reference.md endpoint 2), so this is always derived, never hardcoded.
+  const catalogueCategories = Array.from(new Set(catalogueAllProducts.map((p) => p.category)));
+
+  // search/category/sort/inStockOnly are already applied server-side by
+  // fetchSupplyCatalogue's query params - catalogueProducts IS the
+  // filtered result, nothing left to do client-side.
+  const filteredCatalogueProducts = catalogueProducts;
+
+  const selectedProduct = catalogueProducts.find((p) => p.id === selectedProductId) ?? null;
+  const selectedVariant = selectedProduct?.variants.find((v) => v.id === selectedVariantId) ?? null;
+
+  const handleAddSelectedProductToCart = async () => {
+    if (!selectedProduct) return;
+    setProductDetailAdded(false);
+    const result = await addProductToCart(selectedProduct, selectedVariant, productDetailQuantity);
+    if (result) {
+      refreshCart();
+      setProductDetailAdded(true);
+      setTimeout(() => setProductDetailAdded(false), 1500);
+    }
+  };
+
+  const cartWholesaler = cart?.wholesalerId ? wholesalers.find((w) => w.id === cart.wholesalerId) ?? null : null;
+  const cartSubtotal = cart ? getCartSubtotal(cart) : 0;
+  const cartMeetsMinimum = !cart || cart.items.length === 0 || !cartPolicies || cartSubtotal >= cartPolicies.minOrderAmount;
+
+  // Estimate only, for display before placing - the server computes the
+  // real charge at order time (see bakery-api-reference.md endpoint 4).
+  // Free-delivery threshold, if the wholesaler has one, waives the charge.
+  const checkoutDeliveryFee =
+    checkoutFulfillment === 'Delivery' && cartPolicies
+      ? cartPolicies.freeDeliveryThreshold > 0 && cartSubtotal >= cartPolicies.freeDeliveryThreshold
+        ? 0
+        : cartPolicies.deliveryCharge
+      : 0;
+
+  // Only RECEIVED and CANCELLED are confirmed values so far (see
+  // bakery-api-reference.md endpoint 5's "Open items to confirm" note) -
+  // any other status string, known or not-yet-seen, gets the same
+  // neutral fallback treatment rather than assuming a color/meaning for
+  // a value we haven't verified.
+  const supplyOrderStatusClass = (status: string) => {
+    switch (status) {
+      case 'RECEIVED': return 'bg-blue-50 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 border border-blue-200/50';
+      case 'CANCELLED': return 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400';
+      default: return 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border border-[var(--border)]';
+    }
+  };
+
+  // Tabs are framed around what we actually know (only CANCELLED is a
+  // confirmed terminal status) rather than assuming a "Delivered"/
+  // "Completed" value exists yet - "Active" is everything not cancelled,
+  // which stays correct even as new status values show up.
+  const filteredSupplyOrders = supplyOrders.filter((o) => {
+    if (supplyOrdersTab === 'Active') return o.status !== 'CANCELLED';
+    if (supplyOrdersTab === 'Cancelled') return o.status === 'CANCELLED';
+    return true;
+  });
+
+  const selectedOrderListItem = supplyOrders.find((o) => o.id === selectedOrderId) ?? null;
+  const selectedOrderWholesaler = selectedOrderListItem
+    ? wholesalers.find((w) => w.id === selectedOrderListItem.wholesalerId) ?? null
+    : null;
 
   // Navigation config array for desktop/sidebar layout
   const navigationItems = [
@@ -2582,104 +3054,133 @@ export default function Webapp() {
                 </div>
               )}
 
-              {/* TAB 5: SUPPLY HUB */}
+              {/* TAB 5: SUPPLY HUB — Screen 1: Browse Suppliers */}
               {activeTab === 'supply' && (
                 <div className="w-full animate-fadeIn">
 
                   {/* Header Title */}
                   <div className="mb-6 flex justify-between items-center">
                     <h2 className="font-serif text-3xl md:text-4xl font-bold text-[var(--text-primary)]">Supply Hub</h2>
-                    <button className="relative w-11 h-11 rounded-full border border-[var(--border)] bg-[var(--surface)] flex items-center justify-center cursor-pointer shadow-sm">
-                      <ShoppingBag size={18} />
-                      <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[var(--accent)] text-white text-[9px] font-extrabold rounded-full flex items-center justify-center border border-[var(--surface)]">
-                        {cartCount}
-                      </span>
-                    </button>
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        onClick={() => setActiveSheet('supply-orders')}
+                        className="w-11 h-11 rounded-full border border-[var(--border)] bg-[var(--surface)] flex items-center justify-center cursor-pointer shadow-sm"
+                      >
+                        <ClipboardList size={18} />
+                      </button>
+                      <button
+                        onClick={() => { refreshCart(); setActiveSheet('supply-cart'); }}
+                        className="relative w-11 h-11 rounded-full border border-[var(--border)] bg-[var(--surface)] flex items-center justify-center cursor-pointer shadow-sm"
+                      >
+                        <ShoppingBag size={18} />
+                        <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[var(--accent)] text-white text-[9px] font-extrabold rounded-full flex items-center justify-center border border-[var(--surface)]">
+                          {cartCount}
+                        </span>
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Filter Section */}
-                  <div className="flex flex-col gap-3 mb-6">
+                  {/* Search. Sort chips removed: "Top Rated" and "Organic" had no
+                      backing data in the real API (no ratings, no tags/certifications
+                      concept - see bakery-api-reference.md's cross-cutting notes) and
+                      "Nearest" is no longer a toggle since GET /wholesalers already
+                      returns nearest-first server-side whenever device location is
+                      available - there's nothing left to choose between. */}
+                  <div className="flex flex-col gap-2 mb-6">
                     <div className="relative flex items-center border border-[var(--border)] rounded-2xl bg-[var(--surface)] overflow-hidden px-4 focus-within:border-[var(--accent)] transition-colors">
                       <Search size={16} className="text-[var(--text-secondary)]" />
                       <input
                         type="text"
-                        placeholder="Search bulk chocolate, boxes, butter..."
+                        placeholder="Search for suppliers..."
                         value={supplySearch}
                         onChange={(e) => setSupplySearch(e.target.value)}
                         className="w-full py-3 px-2 text-xs outline-none bg-transparent"
                       />
                     </div>
-
-                    <div className="flex gap-2 overflow-x-auto no-scrollbar py-1">
-                      {['All', 'Chocolates', 'Dairy & Fats', 'Packaging', 'Tools'].map((tabName) => (
-                        <button
-                          key={tabName}
-                          onClick={() => setSupplyTab(tabName)}
-                          className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${supplyTab === tabName
-                            ? 'bg-[var(--accent)] text-white shadow-sm'
-                            : 'bg-[var(--surface)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900'
-                            }`}
-                        >
-                          {tabName}
-                        </button>
-                      ))}
-                    </div>
+                    {/* Required attribution for OSM/Nominatim-derived coordinates —
+                        see bakery-api-reference.md endpoint 1's attribution requirement.
+                        Shown once here since distance appears on every card below. */}
+                    <p className="text-[9.5px] text-[var(--text-secondary)]/70 px-1">
+                      Distances © OpenStreetMap contributors
+                    </p>
                   </div>
 
-                  {/* Partner Banner & Products Grid layout */}
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start mb-8">
-
-                    {/* Verified Partner Banner */}
-                    <div className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm flex flex-col justify-between overflow-hidden relative min-h-[220px]">
-                      <div>
-                        <span className="text-[9.5px] font-extrabold text-[var(--accent)] bg-[var(--accent)]/10 border border-[var(--accent)]/20 px-3 py-1 rounded-full uppercase tracking-wider">
-                          Verified Local Partner
-                        </span>
-                        <h3 className="font-serif font-bold text-xl text-[var(--text-primary)] mt-3">Gupta Wholesale Mart</h3>
-                        <p className="text-[10px] text-[var(--text-secondary)] mt-1">2.4 km away • Fast Flash Pickup Available</p>
-                      </div>
-
-                      <div className="flex items-center justify-between mt-4">
-                        <div className="inline-flex items-center gap-1 bg-amber-50 dark:bg-amber-950/20 text-[var(--accent)] text-[10px] font-bold px-2.5 py-1 rounded-full border border-amber-200/50">
-                          🚚 Flash Pickup
-                        </div>
-                        <span className="text-3xl">🏭</span>
-                      </div>
+                  {wholesalersError && (
+                    <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3 mb-6">
+                      <span className="flex items-center gap-2"><AlertCircle size={14} /> {wholesalersError}</span>
+                      <button onClick={fetchSupplyWholesalers} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
                     </div>
+                  )}
 
-                    {/* Products Grid */}
-                    <div className="lg:col-span-2 flex flex-col">
-                      <div className="flex justify-between items-center mb-4">
-                        <h3 className="font-serif text-lg font-bold">Popular Products</h3>
-                        <span className="text-xs text-[var(--text-secondary)]">Showing {supplyProducts.filter(p => supplyTab === 'All' || p.category === supplyTab).length} products</span>
-                      </div>
+                  {/* Supplier List */}
+                  <div className="flex flex-col gap-4">
+                    {wholesalersLoading &&
+                      [0, 1, 2].map((i) => (
+                        <div key={i} className="h-40 bg-[var(--text-primary)]/8 rounded-[24px] animate-pulse" />
+                      ))}
 
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                        {supplyProducts
-                          .filter(p => supplyTab === 'All' || p.category === supplyTab)
-                          .filter(p => p.name.toLowerCase().includes(supplySearch.toLowerCase()))
-                          .map((p, idx) => (
-                            <div
-                              key={idx}
-                              className="bg-[var(--surface)] rounded-[22px] border border-[var(--border)] p-3 shadow-sm hover:shadow-md transition-all flex flex-col hover:border-[var(--accent)]/30"
-                            >
-                              <div className="w-full h-24 sm:h-28 bg-neutral-50 dark:bg-[#1A0C06] rounded-xl flex items-center justify-center text-4xl mb-3 border border-[var(--border)] select-none">
-                                {p.image}
+                    {!wholesalersLoading && !wholesalersError && filteredWholesalers.length === 0 && (
+                      <p className="text-xs text-[var(--text-secondary)] text-center py-8">No suppliers found.</p>
+                    )}
+
+                    {!wholesalersLoading &&
+                      filteredWholesalers.map((w) => (
+                        <div
+                          key={w.id}
+                          className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] shadow-sm hover:shadow-md hover:border-[var(--accent)]/30 transition-all overflow-hidden flex flex-col"
+                        >
+                          {/* Banner — Store icon on an accent-tinted block; no product photography in this app's design system today, see logoUrl on Wholesaler for a future real-photo swap. */}
+                          <div
+                            className="w-full h-28 bg-[var(--accent)]/[0.06] border-b border-[var(--border)] flex items-center justify-center relative select-none"
+                          >
+                            {w.logoUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={w.logoUrl} alt={w.businessName} className="w-full h-full object-cover" />
+                            ) : (
+                              <Store size={32} className="text-[var(--accent)]/50" />
+                            )}
+                          </div>
+
+                          <div className="p-5 flex flex-col flex-1 justify-between">
+                            <div>
+                              <div className="flex justify-between items-start gap-2 mb-1.5">
+                                <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] leading-tight">{w.businessName}</h3>
+                                {w.distanceKm != null && (
+                                  <span className="text-[10px] font-semibold text-[var(--text-secondary)] bg-[var(--text-primary)]/5 px-2 py-1 rounded-md shrink-0">
+                                    {w.distanceKm.toFixed(1)} km
+                                  </span>
+                                )}
                               </div>
-                              <h4 className="font-bold text-xs text-[var(--text-primary)] line-clamp-2 leading-tight flex-1">{p.name}</h4>
-                              <span className="text-[9.5px] text-[var(--text-secondary)] mt-1">by Gupta Wholesale</span>
-
-                              <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-[var(--border)]/50">
-                                <span className="font-bold text-xs sm:text-sm">₹{p.price.toLocaleString('en-IN')}</span>
-                                <button className="text-[10px] font-bold text-[var(--accent)] hover:bg-orange-50 dark:hover:bg-orange-950/20 px-2.5 py-1 rounded-full border border-[var(--accent)]/30 hover:border-[var(--accent)] transition-all cursor-pointer">
-                                  View
-                                </button>
+                              <p className="text-[11px] text-[var(--text-secondary)] mb-3 line-clamp-2">{w.businessType} · {w.address}</p>
+                              <div className="flex gap-3 mb-1">
+                                {w.deliveryEnabled && (
+                                  <div className="flex items-center gap-1 text-[var(--text-secondary)] text-[10.5px] font-semibold">
+                                    <Truck size={14} /> Delivery
+                                  </div>
+                                )}
+                                {w.pickupEnabled && (
+                                  <div className="flex items-center gap-1 text-[var(--text-secondary)] text-[10.5px] font-semibold">
+                                    <Store size={14} /> Pickup
+                                  </div>
+                                )}
                               </div>
                             </div>
-                          ))}
-                      </div>
-                    </div>
 
+                            <div className="pt-3 mt-3 border-t border-[var(--border)] flex justify-between items-center gap-2">
+                              <span className="text-[10.5px] font-semibold text-[var(--accent)] flex items-center gap-1 min-w-0 flex-1">
+                                <Clock size={13} className="shrink-0" />
+                                <span className="truncate min-w-0">{w.expectedDeliveryTime}</span>
+                              </span>
+                              <button
+                                onClick={() => { setSelectedWholesalerId(w.id); setActiveSheet('supply-catalogue'); }}
+                                className="text-xs font-bold text-[var(--accent)] hover:underline shrink-0 cursor-pointer"
+                              >
+                                View Catalogue
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                   </div>
 
                 </div>
@@ -2774,6 +3275,28 @@ export default function Webapp() {
                           <span className="text-xs font-bold text-[var(--text-secondary)]">
                             {bakerProfile?.verification.fssaiNumber ? (bakerProfile.verification.fssaiVerified ? 'Verified' : 'Pending verification') : 'Not on file'}
                           </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Category 1a: Financial Tools — Expenses moved here from
+                        the bottom nav to make room for Marketplace; same
+                        tab/screen/data, just relocated to its own section. */}
+                    <div className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] p-5 shadow-sm">
+                      <h4 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-4 flex items-center gap-1.5">
+                        💰 Financial Tools
+                      </h4>
+
+                      <div className="flex flex-col gap-1.5">
+                        <div
+                          onClick={() => setActiveTab('expenses')}
+                          className="flex items-center justify-between py-2.5 cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Wallet size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Expenses</span>
+                          </div>
+                          <ChevronRight size={14} className="text-[var(--text-secondary)]" />
                         </div>
                       </div>
                     </div>
@@ -3112,12 +3635,12 @@ export default function Webapp() {
             </main>
 
             {/* --- MOBILE BOTTOM NAVIGATION TAB BAR ---
-                6 tabs now that Expenses has its own always-visible slot
-                (see note below) — px-3.5 per-button + px-6 container
-                padding was sized for 5 tabs and overflowed the nav bar
-                horizontally below ~430px (buttons got clipped/hidden on
-                real phone widths). Padding is tightened on the smallest
-                screens and restored from sm: up. */}
+                6 tabs: Home, Orders, Customers, Marketplace, Calendar,
+                Settings — px-3.5 per-button + px-6 container padding was
+                sized for 5 tabs and overflowed the nav bar horizontally
+                below ~430px (buttons got clipped/hidden on real phone
+                widths). Padding is tightened on the smallest screens and
+                restored from sm: up. */}
             <div className="absolute bottom-0 left-0 right-0 z-40 bg-[var(--background)] border-t border-[var(--border)] px-1 sm:px-6 py-2.5 flex justify-between items-center shadow-lg select-none">
 
               <button
@@ -3147,13 +3670,19 @@ export default function Webapp() {
                 <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Customers</span>
               </button>
 
-              {/* The mock's dynamic 4th slot cycled between Calendar/Supply/Expenses
-                  but nothing anywhere ever called setActiveTab('expenses') or
-                  ('supply') — those screens were unreachable via any tap target.
-                  Supply Hub has no backend module at all (out of scope). Expenses
-                  is real (Investments) and now needs a real, always-visible entry
-                  point, so it's split into its own static button below rather
-                  than left undiscoverable. */}
+              {/* Marketplace (Supply Hub) - entry point to Browse Suppliers.
+                  Expenses moved into Settings (see the Settings tab body)
+                  to free up this always-visible slot; its screens/data are
+                  unchanged, just relocated. */}
+              <button
+                onClick={() => setActiveTab('supply')}
+                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'supply' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+              >
+                <ShoppingBag size={18} />
+                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Marketplace</span>
+              </button>
+
               <button
                 onClick={() => setActiveTab('calendar')}
                 className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'calendar' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -3161,15 +3690,6 @@ export default function Webapp() {
               >
                 <CalendarIcon size={18} />
                 <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Calendar</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab('expenses')}
-                className={`flex flex-col items-center gap-1 px-1.5 sm:px-3.5 py-1 rounded-full transition-all cursor-pointer ${activeTab === 'expenses' ? 'text-[var(--accent)] font-bold scale-105' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                  }`}
-              >
-                <Wallet size={18} />
-                <span className="text-[8.5px] sm:text-[9px] uppercase tracking-wider font-semibold">Expenses</span>
               </button>
 
               <button
@@ -5076,6 +5596,857 @@ export default function Webapp() {
                               )}
                             </div>
                           </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* SHEET: SUPPLY CATALOGUE — Screen 2. Reads through
+                        src/lib/marketplace/client.ts (mock today), scoped
+                        to selectedWholesalerId set from the supplier list. */}
+                    {activeSheet === 'supply-catalogue' && selectedWholesaler && (
+                      <div className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-1">
+                          <button
+                            onClick={() => (selectedProduct ? setSelectedProductId(null) : setActiveSheet('none'))}
+                            className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                          >
+                            <X size={20} />
+                          </button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold text-center px-2 truncate">
+                            {selectedProduct ? selectedProduct.name : selectedWholesaler.businessName}
+                          </h3>
+                          <span className="w-8" />
+                        </div>
+
+                        {selectedProduct && (
+                          <div className="flex-1 flex flex-col overflow-y-auto">
+                            <div className="w-full h-56 rounded-[24px] bg-neutral-50 dark:bg-[#1A0C06] border border-[var(--border)] flex items-center justify-center select-none relative mb-5 shrink-0 overflow-hidden">
+                              {selectedProduct.imageUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img src={selectedProduct.imageUrl} alt={selectedProduct.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <Store size={48} className="text-[var(--text-secondary)]/30" />
+                              )}
+                              <span
+                                className={`absolute top-4 left-4 text-[10px] font-bold px-3 py-1.5 rounded-full shadow-sm flex items-center gap-1.5 ${selectedProduct.stockStatus === 'In Stock'
+                                  ? 'bg-[var(--surface)] text-[var(--accent)]'
+                                  : selectedProduct.stockStatus === 'Low Stock'
+                                    ? 'bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border border-amber-200/50'
+                                    : 'bg-[var(--surface)] text-red-600 dark:text-red-400'
+                                  }`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${selectedProduct.stockStatus === 'In Stock' ? 'bg-[var(--accent)]' : selectedProduct.stockStatus === 'Low Stock' ? 'bg-amber-500' : 'bg-red-500'}`} />
+                                {selectedProduct.stockStatus}
+                              </span>
+                            </div>
+
+                            {selectedProduct.brand && (
+                              <p className="text-[10.5px] font-semibold text-[var(--text-secondary)] uppercase tracking-wider mb-4 -mt-2">{selectedProduct.brand}</p>
+                            )}
+
+                            {selectedProduct.variants.length > 1 && (
+                              <div className="mb-6">
+                                <h4 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-3">Select Size</h4>
+                                <div className="flex gap-2 flex-wrap">
+                                  {selectedProduct.variants.map((v) => (
+                                    <button
+                                      key={v.id}
+                                      onClick={() => setSelectedVariantId(v.id)}
+                                      className={`px-4 py-2.5 rounded-xl border text-xs font-bold transition-all min-w-[90px] text-center cursor-pointer ${v.id === selectedVariantId
+                                        ? 'bg-[var(--accent)] border-[var(--accent)] text-white shadow-sm'
+                                        : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--accent)]/40'
+                                        }`}
+                                    >
+                                      {v.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {selectedProductPolicies?.deliveryEnabled && (
+                              <div className="bg-[var(--background)] rounded-xl p-4 border border-[var(--border)] flex gap-4 items-start mb-4">
+                                <div className="w-10 h-10 rounded-full bg-[var(--accent)]/10 text-[var(--accent)] flex items-center justify-center shrink-0">
+                                  <Truck size={18} />
+                                </div>
+                                <div>
+                                  <h5 className="text-xs font-bold text-[var(--text-primary)] mb-0.5">{selectedProductPolicies.expectedDeliveryTime}</h5>
+                                  <p className="text-[11px] text-[var(--text-secondary)]">via {selectedWholesaler.businessName}</p>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Bulk-order notice — only shown when the wholesaler has
+                                actually configured a free-delivery threshold; no
+                                placeholder box when that policy data is absent. */}
+                            {!!selectedProductPolicies?.freeDeliveryThreshold && (
+                              <div className="bg-[var(--background)] rounded-xl p-4 border border-[var(--border)] flex gap-4 items-start mb-6">
+                                <div className="w-10 h-10 rounded-full bg-[var(--accent)]/10 text-[var(--accent)] flex items-center justify-center shrink-0">
+                                  <FileText size={18} />
+                                </div>
+                                <div>
+                                  <h5 className="text-xs font-bold text-[var(--text-primary)] mb-0.5">
+                                    Free delivery over ₹{selectedProductPolicies.freeDeliveryThreshold.toLocaleString('en-IN')}
+                                  </h5>
+                                  {selectedProductPolicies.minOrderAmount > 0 && (
+                                    <p className="text-[11px] text-[var(--text-secondary)]">Min. order ₹{selectedProductPolicies.minOrderAmount.toLocaleString('en-IN')}</p>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                            {selectedProductPoliciesLoading && (
+                              <div className="h-16 bg-[var(--text-primary)]/8 rounded-xl animate-pulse mb-6" />
+                            )}
+
+                            <div className="mt-auto pt-4 flex items-center gap-3">
+                              <div className="flex items-center bg-[var(--background)] rounded-xl border border-[var(--border)] h-[54px] px-1 shrink-0">
+                                <button
+                                  onClick={() => setProductDetailQuantity((q) => Math.max(1, q - 1))}
+                                  className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer"
+                                >
+                                  <Minus size={16} />
+                                </button>
+                                <span className="w-8 text-center text-sm font-bold text-[var(--text-primary)]">{productDetailQuantity}</span>
+                                <button
+                                  onClick={() => setProductDetailQuantity((q) => q + 1)}
+                                  className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer"
+                                >
+                                  <Plus size={16} />
+                                </button>
+                              </div>
+                              <button
+                                onClick={handleAddSelectedProductToCart}
+                                disabled={selectedProduct.stockStatus === 'Out of Stock'}
+                                className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-neutral-400 disabled:cursor-not-allowed text-white h-[54px] rounded-xl font-bold text-sm flex items-center justify-center gap-2 active:scale-[0.98] transition-all shadow-md cursor-pointer"
+                              >
+                                {productDetailAdded ? (
+                                  <><Check size={18} /> Added to Cart</>
+                                ) : (
+                                  <><ShoppingCart size={18} /> Add to Cart – ₹{(getDisplayPrice(selectedProduct, selectedVariant) * productDetailQuantity).toLocaleString('en-IN')}</>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {!selectedProduct && (
+                        <>
+                        <p className="text-[11px] text-[var(--text-secondary)] text-center mb-5">
+                          {bakerLocation && selectedWholesaler.latitude != null && selectedWholesaler.longitude != null
+                            ? `${haversineDistanceKm(bakerLocation.lat, bakerLocation.lng, selectedWholesaler.latitude, selectedWholesaler.longitude).toFixed(1)} km • `
+                            : ''}
+                          {[selectedWholesaler.deliveryEnabled && 'Delivery', selectedWholesaler.pickupEnabled && 'Pickup'].filter(Boolean).join(' & ')}
+                        </p>
+
+                        <div className="relative flex items-center border border-[var(--border)] rounded-2xl bg-[var(--background)] overflow-hidden px-4 mb-4 focus-within:border-[var(--accent)] transition-colors">
+                          <Search size={16} className="text-[var(--text-secondary)]" />
+                          <input
+                            type="text"
+                            placeholder="Search for products..."
+                            value={catalogueSearch}
+                            onChange={(e) => setCatalogueSearch(e.target.value)}
+                            className="w-full py-3 px-2 text-xs outline-none bg-transparent"
+                          />
+                        </div>
+
+                        <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 mb-4">
+                          {(['All', ...catalogueCategories]).map((cat) => (
+                            <button
+                              key={cat}
+                              onClick={() => setCatalogueCategory(cat)}
+                              className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${catalogueCategory === cat
+                                ? 'bg-[var(--accent)] text-white shadow-sm'
+                                : 'bg-[var(--background)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900'
+                                }`}
+                            >
+                              {cat}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="flex justify-between items-center mb-5">
+                          <button
+                            onClick={cycleCatalogueSort}
+                            className="flex items-center gap-1 text-[11px] font-semibold text-[var(--text-secondary)] hover:text-[var(--accent)] transition-colors cursor-pointer"
+                          >
+                            <ArrowUpDown size={13} /> {catalogueSort}
+                          </button>
+                          <label className="flex items-center gap-2 cursor-pointer text-[11px] font-semibold text-[var(--text-secondary)]">
+                            <span>In Stock Only</span>
+                            <div className="relative">
+                              <input
+                                type="checkbox"
+                                checked={catalogueInStockOnly}
+                                onChange={() => setCatalogueInStockOnly((v) => !v)}
+                                className="sr-only peer"
+                              />
+                              <div className="w-9 h-5 bg-neutral-200 peer-focus:outline-none rounded-full peer dark:bg-neutral-800 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-[var(--accent)]"></div>
+                            </div>
+                          </label>
+                        </div>
+
+                        {catalogueError && (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3 mb-4">
+                            <span className="flex items-center gap-2"><AlertCircle size={14} /> {catalogueError}</span>
+                            <button onClick={fetchSupplyCatalogue} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                          </div>
+                        )}
+
+                        <div className="flex flex-col gap-4 overflow-y-auto pb-4">
+                          {catalogueLoading &&
+                            [0, 1, 2].map((i) => (
+                              <div key={i} className="h-40 bg-[var(--text-primary)]/8 rounded-[24px] animate-pulse" />
+                            ))}
+
+                          {!catalogueLoading && !catalogueError && filteredCatalogueProducts.length === 0 && (
+                            <p className="text-xs text-[var(--text-secondary)] text-center py-8">No products found.</p>
+                          )}
+
+                          {!catalogueLoading &&
+                            filteredCatalogueProducts.map((p) => {
+                              const stockStatus = p.stockStatus;
+                              const displayPrice = getDisplayPrice(p);
+                              const displayUnit = getDisplayUnitLabel(p);
+                              const priceRange = p.variants.length > 1 && new Set(p.variants.map((v) => v.price)).size > 1;
+                              return (
+                                <div
+                                  key={p.id}
+                                  onClick={() => setSelectedProductId(p.id)}
+                                  className={`bg-[var(--surface)] rounded-[24px] border border-[var(--border)] shadow-sm overflow-hidden flex flex-col cursor-pointer hover:border-[var(--accent)]/30 transition-all ${stockStatus === 'Out of Stock' ? 'opacity-60 grayscale-[50%]' : ''
+                                    }`}
+                                >
+                                  <div className="w-full h-32 bg-neutral-50 dark:bg-[#1A0C06] border-b border-[var(--border)] flex items-center justify-center select-none relative overflow-hidden">
+                                    {p.imageUrl ? (
+                                      // eslint-disable-next-line @next/next/no-img-element
+                                      <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
+                                    ) : (
+                                      <Store size={28} className="text-[var(--text-secondary)]/30" />
+                                    )}
+                                    <span
+                                      className={`absolute top-3 left-3 text-[9px] font-bold px-2.5 py-1 rounded-full shadow-sm flex items-center gap-1 ${stockStatus === 'In Stock'
+                                        ? 'bg-[var(--surface)] text-[var(--accent)]'
+                                        : stockStatus === 'Low Stock'
+                                          ? 'bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border border-amber-200/50'
+                                          : 'bg-[var(--surface)] text-red-600 dark:text-red-400'
+                                        }`}
+                                    >
+                                      <span className={`w-1.5 h-1.5 rounded-full ${stockStatus === 'In Stock' ? 'bg-[var(--accent)]' : stockStatus === 'Low Stock' ? 'bg-amber-500' : 'bg-red-500'}`} />
+                                      {stockStatus}
+                                    </span>
+                                  </div>
+
+                                  <div className="p-4 flex flex-col flex-1">
+                                    <h4 className="font-serif font-bold text-sm text-[var(--text-primary)] mb-1">{p.name}</h4>
+                                    {p.brand && (
+                                      <p className="text-[10px] text-[var(--text-secondary)] mb-3 line-clamp-2 flex-1">{p.brand}</p>
+                                    )}
+
+                                    <div className="flex items-end justify-between mt-auto pt-1">
+                                      <div>
+                                        <p className="text-[9.5px] text-[var(--text-secondary)] mb-0.5">Wholesale Price</p>
+                                        <p className="text-sm font-bold text-[var(--text-primary)]">
+                                          {priceRange ? 'From ' : ''}₹{displayPrice.toLocaleString('en-IN')} <span className="text-[10px] text-[var(--text-secondary)] font-normal">/ {displayUnit}</span>
+                                        </p>
+                                      </div>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); handleAddProductToCart(p); }}
+                                        disabled={stockStatus === 'Out of Stock' || addingProductId === p.id}
+                                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shrink-0 ${stockStatus === 'Out of Stock'
+                                          ? 'bg-neutral-200 dark:bg-neutral-800 text-[var(--text-secondary)] cursor-not-allowed'
+                                          : 'bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white shadow-md active:scale-95 cursor-pointer disabled:opacity-70'
+                                          }`}
+                                      >
+                                        {justAddedProductId === p.id ? (
+                                          <Check size={17} />
+                                        ) : (
+                                          <ShoppingCart size={17} />
+                                        )}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                        </div>
+                        </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* SHEET: SUPPLY CART — Screen 4. Own top-level sheet
+                        (not nested like product detail) since it's opened
+                        from the Supply Hub tab's header cart icon, not
+                        from within a specific wholesaler's catalogue. */}
+                    {activeSheet === 'supply-cart' && (
+                      <div className="flex-1 flex flex-col">
+                        {/* Order-success (Screen 6) has no header chrome by design —
+                            a clean, non-navigable confirmation moment, same reasoning
+                            as hiding the X here before this screen existed. */}
+                        {!placedOrder && (
+                          <div className="flex justify-between items-center mb-6">
+                            <button
+                              onClick={() => (showCheckout ? (setShowCheckout(false), setCheckoutError(null)) : closeCartSheet())}
+                              className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                            >
+                              <X size={20} />
+                            </button>
+                            <h3 className="font-serif text-xl md:text-2xl font-bold text-center px-2 truncate">
+                              {showCheckout ? 'Checkout' : `Cart${cartWholesaler ? ` • ${cartWholesaler.businessName}` : ''}`}
+                            </h3>
+                            <span className="w-8" />
+                          </div>
+                        )}
+
+                        {placedOrder && placedOrderContext ? (
+                          <div className="flex-1 flex flex-col items-center text-center gap-5 py-4 overflow-y-auto">
+                            <div className="relative w-32 h-32 rounded-full bg-[var(--accent)]/10 flex items-center justify-center shrink-0 mt-2">
+                              <div className="absolute -top-3 -right-3 w-14 h-14 bg-[var(--accent)]/20 rounded-full blur-2xl pointer-events-none" />
+                              <CheckCircle2 size={52} className="text-[var(--accent)] relative" />
+                            </div>
+
+                            <div>
+                              <h4 className="font-serif text-2xl font-bold text-[var(--text-primary)] mb-2">Order Placed!</h4>
+                              <p className="text-sm text-[var(--text-secondary)] px-2">
+                                Thank you for your order. {placedOrderContext.wholesalerName} has been notified.
+                              </p>
+                            </div>
+
+                            <div className="w-full bg-[var(--background)] rounded-2xl border border-[var(--border)] p-4 flex flex-col gap-3 text-left">
+                              <div className="flex justify-between items-center pb-3 border-b border-[var(--border)]">
+                                <span className="text-xs font-semibold text-[var(--text-secondary)]">Order Number</span>
+                                <span className="text-sm font-bold text-[var(--text-primary)]">#{placedOrder.id}</span>
+                              </div>
+                              <div className="flex justify-between items-center pb-3 border-b border-[var(--border)]">
+                                <span className="text-xs font-semibold text-[var(--text-secondary)]">Total</span>
+                                <span className="text-sm font-bold text-[var(--accent)]">₹{placedOrder.totalAmount.toLocaleString('en-IN')}</span>
+                              </div>
+                              <div className="flex justify-between items-center gap-3">
+                                <div className="flex items-center gap-2 text-[var(--accent)] shrink-0">
+                                  {placedOrderContext.fulfilmentMode === 'PICKUP' ? <Store size={16} /> : <Truck size={16} />}
+                                  <span className="text-xs font-semibold whitespace-nowrap">
+                                    {placedOrderContext.fulfilmentMode === 'PICKUP' ? 'Pickup Location' : 'Expected Delivery'}
+                                  </span>
+                                </div>
+                                <span className="text-xs text-[var(--text-primary)] text-right">
+                                  {placedOrderContext.fulfilmentMode === 'PICKUP' ? placedOrderContext.wholesalerName : placedOrderContext.expectedDeliveryTime}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="w-full flex flex-col gap-2.5 mt-auto pt-2 shrink-0">
+                              <button
+                                onClick={() => { resetCheckoutState(); setActiveSheet('supply-orders'); }}
+                                className="w-full h-[52px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white rounded-2xl font-bold text-sm flex items-center justify-center shadow-md active:scale-[0.98] transition-all cursor-pointer"
+                              >
+                                View Order
+                              </button>
+                              <button
+                                onClick={closeCartSheet}
+                                className="w-full h-[52px] bg-transparent border-2 border-[var(--border)] text-[var(--text-primary)] rounded-2xl font-bold text-sm flex items-center justify-center hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors cursor-pointer"
+                              >
+                                Back to Suppliers
+                              </button>
+                            </div>
+                          </div>
+                        ) : showCheckout && cart ? (
+                          <div className="flex-1 flex flex-col overflow-y-auto">
+                            <div className="text-center mb-6">
+                              <p className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-widest mb-1">Order For</p>
+                              <h4 className="font-serif text-2xl font-bold text-[var(--accent)]">{cartWholesaler?.businessName}</h4>
+                            </div>
+
+                            {cartWholesaler && cartWholesaler.deliveryEnabled && cartWholesaler.pickupEnabled && (
+                              <div className="bg-[var(--background)] rounded-xl p-1 flex border border-[var(--border)] mb-5">
+                                {(['Delivery', 'Pickup'] as const).map((option) => (
+                                  <button
+                                    key={option}
+                                    onClick={() => setCheckoutFulfillment(option)}
+                                    className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${checkoutFulfillment === option
+                                      ? 'bg-[var(--accent)] text-white shadow-sm'
+                                      : 'text-[var(--text-secondary)] hover:bg-[var(--surface)]'
+                                      }`}
+                                  >
+                                    {option}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            <div className="bg-[var(--background)] rounded-2xl border border-[var(--border)] divide-y divide-[var(--border)] mb-5">
+                              {checkoutFulfillment === 'Delivery' ? (
+                                <div className="p-4 flex gap-3 items-start">
+                                  <div className="w-9 h-9 rounded-full bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center text-[var(--accent)] shrink-0">
+                                    <MapPin size={16} />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-[9.5px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-1.5">Delivery Address</p>
+                                    {bakerProfile?.business.businessName && (
+                                      <p className="text-xs font-bold text-[var(--text-primary)] mb-1.5">{bakerProfile.business.businessName}</p>
+                                    )}
+                                    <textarea
+                                      value={checkoutAddress}
+                                      onChange={(e) => setCheckoutAddress(e.target.value)}
+                                      placeholder="Full delivery address"
+                                      rows={2}
+                                      className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none focus:border-[var(--accent)] resize-none"
+                                    />
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="p-4 flex gap-3 items-start">
+                                  <div className="w-9 h-9 rounded-full bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center text-[var(--accent)] shrink-0">
+                                    <Store size={16} />
+                                  </div>
+                                  <div>
+                                    <p className="text-[9.5px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-1">Pickup From</p>
+                                    <p className="text-xs text-[var(--text-primary)]">{cartPolicies?.pickupLocation || cartWholesaler?.address}</p>
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="p-4 flex gap-3 items-start">
+                                <div className="w-9 h-9 rounded-full bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center text-[var(--accent)] shrink-0">
+                                  <CreditCard size={16} />
+                                </div>
+                                <div>
+                                  <p className="text-[9.5px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-1">Payment</p>
+                                  {/* No free-text payment-terms field exists in this API - only
+                                      advancePercentage + whether it's configured at all. See
+                                      bakery-api-reference.md endpoint 3. */}
+                                  <p className="text-xs text-[var(--text-primary)]">
+                                    {cartPoliciesLoading
+                                      ? 'Loading...'
+                                      : cartPolicies?.paymentPolicyConfigured
+                                        ? `Advance payment: ${cartPolicies.advancePercentage}% required`
+                                        : 'Payment terms not set up by this wholesaler yet'}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="p-4 flex gap-3 items-start">
+                                <div className="w-9 h-9 rounded-full bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center text-[var(--accent)] shrink-0">
+                                  <FileText size={16} />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-[9.5px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-1.5">Notes (optional)</p>
+                                  <textarea
+                                    value={checkoutInstructions}
+                                    onChange={(e) => setCheckoutInstructions(e.target.value)}
+                                    placeholder="e.g. Call on arrival, use back entrance"
+                                    rows={2}
+                                    className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none focus:border-[var(--accent)] resize-none"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+
+                            <h5 className="font-serif text-base font-bold text-[var(--text-primary)] mb-3">Order Summary</h5>
+                            <div className="bg-[var(--background)] rounded-2xl border border-[var(--border)] divide-y divide-[var(--border)] mb-5">
+                              {cart.items.map((item) => (
+                                <div key={`${item.product.id}:${item.variant?.id ?? ''}`} className="p-3.5 flex items-center gap-3">
+                                  <div className="w-11 h-11 rounded-lg bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0 select-none overflow-hidden">
+                                    {item.product.imageUrl ? (
+                                      // eslint-disable-next-line @next/next/no-img-element
+                                      <img src={item.product.imageUrl} alt={item.product.name} className="w-full h-full object-cover" />
+                                    ) : (
+                                      <Store size={18} className="text-[var(--text-secondary)]/30" />
+                                    )}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-xs font-bold text-[var(--text-primary)] truncate">{item.product.name}</p>
+                                    <p className="text-[10px] text-[var(--text-secondary)]">{getDisplayUnitLabel(item.product, item.variant)}</p>
+                                  </div>
+                                  <div className="text-right shrink-0">
+                                    <p className="text-[10.5px] text-[var(--text-secondary)]">x {item.quantity}</p>
+                                    <p className="text-xs font-bold text-[var(--text-primary)]">₹{(getDisplayPrice(item.product, item.variant) * item.quantity).toLocaleString('en-IN')}</p>
+                                  </div>
+                                </div>
+                              ))}
+
+                              <div className="p-4 flex flex-col gap-2">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-[var(--text-secondary)]">Subtotal</span>
+                                  <span className="text-sm text-[var(--text-primary)]">₹{cartSubtotal.toLocaleString('en-IN')}</span>
+                                </div>
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-[var(--text-secondary)]">Delivery Fee</span>
+                                  <span className="text-sm text-[var(--text-primary)]">₹{checkoutDeliveryFee.toLocaleString('en-IN')}</span>
+                                </div>
+                                <div className="border-t border-[var(--border)] my-1" />
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs font-bold text-[var(--text-primary)]">Estimated Total</span>
+                                  <span className="font-serif text-xl font-bold text-[var(--accent)]">
+                                    ₹{(cartSubtotal + checkoutDeliveryFee).toLocaleString('en-IN')}
+                                  </span>
+                                </div>
+                                {/* Server computes the real total at order time and may differ
+                                    slightly from this estimate - see bakery-api-reference.md
+                                    endpoint 4's pricing note. */}
+                                <p className="text-[9.5px] text-[var(--text-secondary)] text-center pt-1">
+                                  Final total is confirmed by {cartWholesaler?.businessName ?? 'the wholesaler'} when the order is placed.
+                                </p>
+                              </div>
+                            </div>
+
+                            {checkoutError && (
+                              <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3.5 rounded-xl text-xs font-medium flex items-center gap-2 mb-5">
+                                <AlertCircle size={14} /> {checkoutError}
+                              </div>
+                            )}
+
+                            <button
+                              onClick={handlePlaceOrder}
+                              disabled={checkoutSubmitting}
+                              className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 disabled:cursor-not-allowed text-white h-[54px] rounded-2xl font-bold text-sm shrink-0 active:scale-[0.98] transition-all shadow-md cursor-pointer flex items-center justify-center gap-2"
+                            >
+                              <CheckCircle2 size={18} /> {checkoutSubmitting ? 'Placing Order...' : 'Place Order'}
+                            </button>
+                          </div>
+                        ) : (!cart || cart.items.length === 0) ? (
+                          <div className="flex-1 flex flex-col items-center justify-center gap-3 py-12">
+                            {cartUnavailableNotice && (
+                              <div className="w-full bg-amber-50 dark:bg-amber-950/20 border border-amber-200/50 text-amber-700 dark:text-amber-400 px-3 py-2.5 rounded-xl text-[11px] font-medium flex items-start gap-2 mb-2">
+                                <AlertCircle size={13} className="mt-0.5 shrink-0" />
+                                <span>Couldn&apos;t re-add (no longer available): {cartUnavailableNotice.join(', ')}</span>
+                              </div>
+                            )}
+                            <ShoppingCart size={32} className="text-[var(--text-secondary)]" />
+                            <p className="text-xs text-[var(--text-secondary)] text-center">Your cart is empty.</p>
+                            <button
+                              onClick={closeCartSheet}
+                              className="text-xs font-bold text-[var(--accent)] hover:underline cursor-pointer"
+                            >
+                              Browse Suppliers
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex-1 flex flex-col overflow-y-auto">
+                            {cartUnavailableNotice && (
+                              <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200/50 text-amber-700 dark:text-amber-400 px-3 py-2.5 rounded-xl text-[11px] font-medium flex items-start gap-2 mb-4">
+                                <AlertCircle size={13} className="mt-0.5 shrink-0" />
+                                <span>Couldn&apos;t re-add (no longer available): {cartUnavailableNotice.join(', ')}</span>
+                              </div>
+                            )}
+                            <div className="flex flex-col gap-3 mb-5">
+                              {cart.items.map((item) => {
+                                const lineKey = `${item.product.id}:${item.variant?.id ?? ''}`;
+                                const updating = cartUpdatingKey === lineKey;
+                                const variantId = item.variant?.id ?? null;
+                                return (
+                                  <div key={lineKey} className="flex gap-3 bg-[var(--background)] rounded-2xl border border-[var(--border)] p-3">
+                                    <div className="w-16 h-16 rounded-xl bg-neutral-50 dark:bg-[#1A0C06] border border-[var(--border)] flex items-center justify-center shrink-0 select-none overflow-hidden">
+                                      {item.product.imageUrl ? (
+                                        // eslint-disable-next-line @next/next/no-img-element
+                                        <img src={item.product.imageUrl} alt={item.product.name} className="w-full h-full object-cover" />
+                                      ) : (
+                                        <Store size={24} className="text-[var(--text-secondary)]/30" />
+                                      )}
+                                    </div>
+                                    <div className="flex-1 min-w-0 flex flex-col justify-between">
+                                      <div className="flex justify-between items-start gap-2">
+                                        <div className="min-w-0">
+                                          <h4 className="text-xs font-bold text-[var(--text-primary)] truncate">{item.product.name}</h4>
+                                          <p className="text-[10.5px] text-[var(--text-secondary)]">{getDisplayUnitLabel(item.product, item.variant)}</p>
+                                        </div>
+                                        <button
+                                          onClick={() => handleCartRemoveItem(item.product.id, variantId)}
+                                          disabled={updating}
+                                          className="p-1 text-[var(--text-secondary)] hover:text-red-600 dark:hover:text-red-400 transition-colors shrink-0 cursor-pointer disabled:opacity-50"
+                                        >
+                                          <Trash2 size={15} />
+                                        </button>
+                                      </div>
+                                      <div className="flex justify-between items-end mt-1">
+                                        <span className="text-xs font-bold text-[var(--text-primary)]">
+                                          ₹{(getDisplayPrice(item.product, item.variant) * item.quantity).toLocaleString('en-IN')}
+                                        </span>
+                                        <div className="flex items-center bg-[var(--surface)] rounded-xl border border-[var(--border)] h-9 px-0.5">
+                                          <button
+                                            onClick={() => handleCartQuantityChange(item.product.id, variantId, item.quantity - 1)}
+                                            disabled={updating}
+                                            className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer disabled:opacity-50"
+                                          >
+                                            <Minus size={13} />
+                                          </button>
+                                          <span className="w-6 text-center text-[11px] font-bold text-[var(--text-primary)]">{item.quantity}</span>
+                                          <button
+                                            onClick={() => handleCartQuantityChange(item.product.id, variantId, item.quantity + 1)}
+                                            disabled={updating}
+                                            className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer disabled:opacity-50"
+                                          >
+                                            <Plus size={13} />
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {cartPolicies && !cartMeetsMinimum && (
+                              <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200/50 rounded-xl p-3.5 flex gap-2.5 items-start mb-5">
+                                <AlertCircle size={15} className="text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
+                                <p className="text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
+                                  Min. order is ₹{cartPolicies.minOrderAmount.toLocaleString('en-IN')}. Add ₹{(cartPolicies.minOrderAmount - cartSubtotal).toLocaleString('en-IN')} more to qualify.
+                                </p>
+                              </div>
+                            )}
+
+                            <div className="bg-[var(--background)] rounded-2xl border border-[var(--border)] p-5 flex flex-col gap-2 mt-auto">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs font-bold text-[var(--text-primary)]">Subtotal</span>
+                                <span className="font-serif text-xl font-bold text-[var(--accent)]">₹{cartSubtotal.toLocaleString('en-IN')}</span>
+                              </div>
+                              <p className="text-[9.5px] text-[var(--text-secondary)]">Delivery fee and final total are shown at checkout.</p>
+                            </div>
+
+                            <button
+                              onClick={() => setShowCheckout(true)}
+                              disabled={!cartMeetsMinimum || cartPoliciesLoading}
+                              className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-neutral-400 disabled:cursor-not-allowed text-white h-[54px] rounded-2xl font-bold text-sm mt-5 shrink-0 active:scale-[0.98] transition-all shadow-md cursor-pointer"
+                            >
+                              Proceed to Checkout
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* SHEET: SUPPLY ORDERS — Screen 7. Global order history
+                        across wholesalers, own top-level sheet like Cart
+                        (reached from the Supply Hub header and from
+                        "View Order" on the order-success screen). */}
+                    {activeSheet === 'supply-orders' && (
+                      <div className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                          <button
+                            onClick={() => (selectedOrderListItem ? setSelectedOrderId(null) : setActiveSheet('none'))}
+                            className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                          >
+                            <X size={20} />
+                          </button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold text-center px-2 truncate">
+                            {selectedOrderListItem ? `Order #${selectedOrderListItem.id}` : 'My Wholesale Orders'}
+                          </h3>
+                          <span className="w-8" />
+                        </div>
+
+                        {selectedOrderListItem ? (
+                          <div className="flex-1 flex flex-col gap-5 overflow-y-auto">
+                            {/* Supplier card. No tagline/phone shown - neither exists in
+                                the wholesaler API response (see bakery-api-reference.md). */}
+                            <div className="bg-[var(--surface)] rounded-2xl border border-[var(--border)] shadow-sm p-4 flex items-center gap-3">
+                              <div className="w-11 h-11 rounded-full bg-[var(--background)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                                <Store size={18} className="text-[var(--accent)]" />
+                              </div>
+                              <h4 className="text-sm font-bold text-[var(--text-primary)] truncate">{selectedOrderListItem.wholesalerBusinessName}</h4>
+                            </div>
+
+                            {/* Status: a single defensive badge, not a fixed step
+                                sequence — the full status enum isn't confirmed yet
+                                (only RECEIVED/CANCELLED verified, see
+                                bakery-api-reference.md endpoint 5), so any value,
+                                known or not, renders the same way rather than
+                                assuming a step order that might not exist. */}
+                            <div className="bg-[var(--surface)] rounded-2xl border border-[var(--border)] shadow-sm p-4">
+                              <h5 className="text-xs font-bold text-[var(--text-primary)] mb-3">Order Status</h5>
+
+                              {selectedOrderStatusLoading && (
+                                <div className="h-16 bg-[var(--text-primary)]/8 rounded-xl animate-pulse" />
+                              )}
+
+                              {selectedOrderStatusError && (
+                                <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-xs font-medium flex items-center justify-between gap-3">
+                                  <span className="flex items-center gap-2"><AlertCircle size={13} /> {selectedOrderStatusError}</span>
+                                  <button onClick={fetchSelectedOrderStatus} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                                </div>
+                              )}
+
+                              {!selectedOrderStatusLoading && !selectedOrderStatusError && (
+                                <div className="flex flex-col gap-3">
+                                  <span className={`self-start inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold ${supplyOrderStatusClass(selectedOrderStatus?.status ?? selectedOrderListItem.status)}`}>
+                                    <span className="w-1.5 h-1.5 bg-current rounded-full" />
+                                    {selectedOrderStatus?.status ?? selectedOrderListItem.status}
+                                  </span>
+                                  {selectedOrderStatus?.advanceStatus && (
+                                    <p className="text-xs text-[var(--text-secondary)]">Advance payment: {selectedOrderStatus.advanceStatus}</p>
+                                  )}
+                                  {selectedOrderStatus?.readyTime && (
+                                    <p className="text-xs text-[var(--text-secondary)]">Ready: {selectedOrderStatus.readyTime}</p>
+                                  )}
+                                  {selectedOrderStatus?.updatedAt && (
+                                    <p className="text-[10.5px] text-[var(--text-secondary)]">
+                                      Last updated {new Date(selectedOrderStatus.updatedAt).toLocaleString('en-IN', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Delivery/pickup info */}
+                            <div className="bg-[var(--accent)]/5 border border-[var(--accent)]/20 rounded-2xl p-4 flex gap-3 items-start">
+                              {selectedOrderListItem.fulfilmentMode === 'PICKUP' ? <Store size={17} className="text-[var(--accent)] mt-0.5 shrink-0" /> : <Truck size={17} className="text-[var(--accent)] mt-0.5 shrink-0" />}
+                              <div>
+                                <h5 className="text-xs font-bold text-[var(--text-primary)] mb-0.5">
+                                  {selectedOrderListItem.fulfilmentMode === 'PICKUP' ? 'Pickup Location' : 'Delivery'}
+                                </h5>
+                                <p className="text-xs text-[var(--text-secondary)]">
+                                  {selectedOrderListItem.fulfilmentMode === 'PICKUP'
+                                    ? selectedOrderPolicies?.pickupLocation || selectedOrderWholesaler?.address || 'To be confirmed'
+                                    : selectedOrderPolicies?.expectedDeliveryTime ?? 'To be confirmed'}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Itemized breakdown - items[] from GET /orders/:id/status.
+                                productName/variantLabel are resolved live (current
+                                catalogue state), not a snapshot from order time.
+                                variantLabel is null if that variant was since
+                                deleted - that line is simply omitted. */}
+                            {selectedOrderStatus && selectedOrderStatus.items.length > 0 && (
+                              <div className="bg-[var(--surface)] rounded-2xl border border-[var(--border)] shadow-sm p-4 flex flex-col gap-3">
+                                <h5 className="text-xs font-bold text-[var(--text-primary)]">Items</h5>
+                                <div className="flex flex-col gap-3">
+                                  {selectedOrderStatus.items.map((item, idx) => (
+                                    <div key={`${item.productId}-${item.variantId ?? idx}`} className="flex justify-between items-start gap-3">
+                                      <div className="min-w-0">
+                                        <p className="text-xs font-semibold text-[var(--text-primary)] truncate">{item.productName}</p>
+                                        {item.variantLabel && (
+                                          <p className="text-[10.5px] text-[var(--text-secondary)] truncate">{item.variantLabel}</p>
+                                        )}
+                                        <p className="text-[10.5px] text-[var(--text-secondary)]">
+                                          {item.quantity} × ₹{item.unitPrice.toLocaleString('en-IN')}
+                                        </p>
+                                      </div>
+                                      <span className="text-xs font-bold text-[var(--text-primary)] shrink-0">
+                                        ₹{item.lineTotal.toLocaleString('en-IN')}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="bg-[var(--surface)] rounded-2xl border border-[var(--border)] shadow-sm p-4 flex flex-col gap-2">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-[var(--text-secondary)]">Items</span>
+                                <span className="text-sm text-[var(--text-primary)]">{selectedOrderListItem.itemCount}</span>
+                              </div>
+                              <div className="border-t border-[var(--border)] my-1" />
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs font-bold text-[var(--text-primary)]">Total</span>
+                                <span className="font-serif text-xl font-bold text-[var(--accent)]">
+                                  ₹{(selectedOrderStatus?.totalAmount ?? selectedOrderListItem.totalAmount).toLocaleString('en-IN')}
+                                </span>
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => selectedOrderStatus && handleReorder(selectedOrderListItem.id, selectedOrderListItem.wholesalerId, selectedOrderStatus.items)}
+                              disabled={!selectedOrderStatus || selectedOrderStatus.items.length === 0 || reorderingOrderId === selectedOrderListItem.id}
+                              className="w-full inline-flex items-center justify-center gap-2 py-3.5 rounded-2xl text-xs font-bold border border-[var(--border)] bg-[var(--surface)] text-[var(--text-primary)] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              {reorderingOrderId === selectedOrderListItem.id ? (
+                                <>
+                                  <span className="w-3.5 h-3.5 border-2 border-[var(--text-primary)]/30 border-t-[var(--text-primary)] rounded-full animate-spin" />
+                                  Reordering…
+                                </>
+                              ) : (
+                                <>
+                                  <RotateCcw size={14} /> Reorder
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 mb-5">
+                              {(['All', 'Active', 'Cancelled'] as const).map((tabName) => (
+                                <button
+                                  key={tabName}
+                                  onClick={() => setSupplyOrdersTab(tabName)}
+                                  className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${supplyOrdersTab === tabName
+                                    ? 'bg-[var(--accent)] text-white shadow-sm'
+                                    : 'bg-[var(--surface)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900'
+                                    }`}
+                                >
+                                  {tabName}
+                                </button>
+                              ))}
+                            </div>
+
+                            {supplyOrdersError && (
+                              <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3 mb-5">
+                                <span className="flex items-center gap-2"><AlertCircle size={14} /> {supplyOrdersError}</span>
+                                <button onClick={fetchSupplyOrders} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                              </div>
+                            )}
+
+                            <div className="flex-1 flex flex-col gap-3 overflow-y-auto">
+                              {supplyOrdersLoading &&
+                                [0, 1, 2].map((i) => (
+                                  <div key={i} className="h-28 bg-[var(--text-primary)]/8 rounded-[24px] animate-pulse" />
+                                ))}
+
+                              {!supplyOrdersLoading && !supplyOrdersError && filteredSupplyOrders.length === 0 && (
+                                <p className="text-xs text-[var(--text-secondary)] text-center py-12">No orders yet.</p>
+                              )}
+
+                              {!supplyOrdersLoading &&
+                                filteredSupplyOrders.map((o) => (
+                                  <div
+                                    key={o.id}
+                                    onClick={() => setSelectedOrderId(o.id)}
+                                    className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] shadow-sm p-4 flex flex-col gap-3 cursor-pointer hover:border-[var(--accent)]/30 transition-all"
+                                  >
+                                    <div className="flex justify-between items-start gap-2">
+                                      <div className="min-w-0">
+                                        <p className="text-[10px] text-[var(--text-secondary)] mb-0.5">Order #{o.id}</p>
+                                        <h4 className="font-serif font-bold text-base text-[var(--text-primary)] truncate">{o.wholesalerBusinessName}</h4>
+                                      </div>
+                                      <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10.5px] font-bold shrink-0 ${supplyOrderStatusClass(o.status)}`}>
+                                        <span className="w-1.5 h-1.5 bg-current rounded-full" />
+                                        {o.status}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">
+                                      <span className="flex items-center gap-1">
+                                        <CalendarIcon size={12} />
+                                        {new Date(o.createdAt).toLocaleDateString('en-IN', { month: 'short', day: 'numeric', year: 'numeric' })}
+                                      </span>
+                                      <span className="w-1 h-1 rounded-full bg-[var(--border)]" />
+                                      <span>{o.itemCount} item{o.itemCount !== 1 ? 's' : ''}</span>
+                                    </div>
+
+                                    <div className="pt-3 border-t border-[var(--border)] flex justify-between items-center">
+                                      <span className="text-sm font-bold text-[var(--text-primary)]">₹{o.totalAmount.toLocaleString('en-IN')}</span>
+                                      <div className="flex items-center gap-4">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleReorder(o.id, o.wholesalerId, o.items);
+                                          }}
+                                          disabled={reorderingOrderId === o.id || o.items.length === 0}
+                                          className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-xs font-bold flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                                        >
+                                          {reorderingOrderId === o.id ? (
+                                            <span className="w-3 h-3 border-2 border-[var(--text-secondary)]/30 border-t-[var(--text-secondary)] rounded-full animate-spin" />
+                                          ) : (
+                                            <RotateCcw size={13} />
+                                          )}
+                                          Reorder
+                                        </button>
+                                        <span className="text-[var(--accent)] text-xs font-bold flex items-center gap-1">
+                                          View Details <ChevronRight size={13} />
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                            </div>
+                          </>
                         )}
                       </div>
                     )}
