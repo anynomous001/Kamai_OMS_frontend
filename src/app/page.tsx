@@ -555,6 +555,45 @@ export default function Webapp() {
   const [editOrderSubmitting, setEditOrderSubmitting] = useState(false);
   const [editOrderError, setEditOrderError] = useState<string | null>(null);
 
+  // Record Payment quick action — a small dedicated modal (not the full Edit
+  // Order form) for the common case of logging a payment just received.
+  // "Add Payment"/"Mark as Fully Paid" reuse PATCH /api/orders/:orderNumber
+  // /payment (recordPayment), which already does incremental-add validation
+  // and paymentStatus/orderStatus recalculation server-side. The secondary
+  // "Edit amount directly" correction path reuses handleUpdateOrder's exact
+  // full-replacement PUT /api/orders/:orderNumber payload shape instead,
+  // since that endpoint has no partial-update mode (UpdateOrderBodySchema
+  // requires customer/cake/delivery/payment all together) - relaxing it to
+  // accept a partial payload would touch a schema shared with the full Edit
+  // Order form for no real benefit, when fetch-then-send is one call and
+  // reuses already-proven code. Always fetched fresh on open rather than
+  // read from selectedOrderDetail, since the order-list card's trigger point
+  // doesn't have that loaded at all.
+  type RecordPaymentDetail = {
+    id: string;
+    orderId: string;
+    status: RealOrderStatus;
+    customer: { name: string; phone: string | null; address: string | null };
+    cake: { category: string; flavour: string; weightInPounds: number | null; quantity: number | null };
+    occasion: string | null;
+    customInstructions: string | null;
+    delivery: { type: string; date: string; time: string | null; charge: number | null };
+    payment: { totalPrice: number; advancePaid: number; balanceDue: number; paymentStatus: string };
+    referencePhotoUrl: string | null;
+    internalNotes: string | null;
+    customFields: { label: string; value: string }[] | null;
+  };
+  const [recordPaymentOrderNumber, setRecordPaymentOrderNumber] = useState<string | null>(null);
+  const [recordPaymentDetail, setRecordPaymentDetail] = useState<RecordPaymentDetail | null>(null);
+  const [recordPaymentLoading, setRecordPaymentLoading] = useState(false);
+  const [recordPaymentLoadError, setRecordPaymentLoadError] = useState<string | null>(null);
+  const [recordPaymentAddAmount, setRecordPaymentAddAmount] = useState('');
+  const [recordPaymentMethod, setRecordPaymentMethod] = useState<(typeof PAYMENT_METHODS)[number]>('CASH');
+  const [recordPaymentDirectMode, setRecordPaymentDirectMode] = useState(false);
+  const [recordPaymentDirectAmount, setRecordPaymentDirectAmount] = useState('');
+  const [recordPaymentSubmitting, setRecordPaymentSubmitting] = useState(false);
+  const [recordPaymentError, setRecordPaymentError] = useState<string | null>(null);
+
   const openEditOrder = useCallback(() => {
     const d = selectedOrderDetail;
     if (!d) return;
@@ -1241,6 +1280,149 @@ export default function Webapp() {
   useEffect(() => {
     setOrdersPage(1);
   }, [orderTab, orderSearch]);
+
+  const resetRecordPaymentForm = () => {
+    setRecordPaymentAddAmount('');
+    setRecordPaymentMethod('CASH');
+    setRecordPaymentDirectMode(false);
+    setRecordPaymentDirectAmount('');
+    setRecordPaymentError(null);
+  };
+
+  const openRecordPayment = useCallback((orderNumber: string) => {
+    setRecordPaymentOrderNumber(orderNumber);
+    setRecordPaymentDetail(null);
+    setRecordPaymentLoadError(null);
+    resetRecordPaymentForm();
+    setRecordPaymentLoading(true);
+    api
+      .get<{ success: boolean; data: RecordPaymentDetail }>(`/api/orders/${orderNumber}`)
+      .then((res) => {
+        setRecordPaymentDetail(res.data);
+        setRecordPaymentDirectAmount(String(res.data.payment.advancePaid));
+      })
+      .catch((err: any) => setRecordPaymentLoadError(err.message || 'Failed to load order.'))
+      .finally(() => setRecordPaymentLoading(false));
+  }, []);
+
+  const closeRecordPayment = useCallback(() => {
+    setRecordPaymentOrderNumber(null);
+    setRecordPaymentDetail(null);
+    setRecordPaymentLoadError(null);
+    resetRecordPaymentForm();
+  }, []);
+
+  // Refreshes every screen that shows payment status after a successful
+  // save, mirroring handleUpdateOrder's own explicit multi-screen refresh
+  // (dashboard summary + orders list + the open Order Detail, if it's the
+  // same order) rather than relying on the modal closing to be "enough".
+  const refreshAfterPaymentChange = (orderNumber: string) => {
+    fetchDashboardSummary();
+    fetchOrdersList();
+    if (activeSheet === 'customer-profile' && selectedOrderDetail?.orderId === orderNumber) {
+      openOrderDetail(orderNumber);
+    }
+  };
+
+  const submitRecordPayment = async (amountReceived: number) => {
+    if (!recordPaymentOrderNumber || !recordPaymentDetail) return;
+    setRecordPaymentError(null);
+
+    const balanceDue = recordPaymentDetail.payment.balanceDue;
+    if (amountReceived <= 0) {
+      setRecordPaymentError('Enter an amount greater than ₹0.');
+      return;
+    }
+    if (amountReceived > balanceDue) {
+      setRecordPaymentError(`Amount exceeds balance due of ₹${balanceDue.toLocaleString('en-IN')}`);
+      return;
+    }
+
+    setRecordPaymentSubmitting(true);
+    try {
+      await api.patch(`/api/orders/${recordPaymentOrderNumber}/payment`, {
+        amountReceived,
+        paymentMethod: recordPaymentMethod,
+      });
+      const orderNumber = recordPaymentOrderNumber;
+      closeRecordPayment();
+      refreshAfterPaymentChange(orderNumber);
+    } catch (err: any) {
+      setRecordPaymentError(err.message || 'Failed to record payment.');
+    } finally {
+      setRecordPaymentSubmitting(false);
+    }
+  };
+
+  const handleAddPayment = () => {
+    const amount = parseFloat(recordPaymentAddAmount);
+    if (!recordPaymentAddAmount || Number.isNaN(amount)) {
+      setRecordPaymentError('Enter a valid amount.');
+      return;
+    }
+    submitRecordPayment(amount);
+  };
+
+  const handleMarkFullyPaid = () => {
+    if (!recordPaymentDetail) return;
+    submitRecordPayment(recordPaymentDetail.payment.balanceDue);
+  };
+
+  // Correction path — full-replacement PUT, since PATCH /payment only ever
+  // adds and refuses once balanceDue is 0. Carries every other field
+  // through unchanged from the freshly-fetched order (same pattern as
+  // handleUpdateOrder), touching only payment.advancePaid.
+  const handleDirectEditPayment = async () => {
+    if (!recordPaymentOrderNumber || !recordPaymentDetail) return;
+    setRecordPaymentError(null);
+
+    const amount = parseFloat(recordPaymentDirectAmount);
+    const totalPrice = recordPaymentDetail.payment.totalPrice;
+    if (!recordPaymentDirectAmount || Number.isNaN(amount) || amount < 0) {
+      setRecordPaymentError('Enter a valid amount.');
+      return;
+    }
+    if (amount > totalPrice) {
+      setRecordPaymentError(`Amount exceeds total price of ₹${totalPrice.toLocaleString('en-IN')}`);
+      return;
+    }
+
+    const d = recordPaymentDetail;
+    setRecordPaymentSubmitting(true);
+    try {
+      await api.put(`/api/orders/${recordPaymentOrderNumber}`, {
+        customer: { name: d.customer.name, phone: d.customer.phone, address: d.customer.address ?? undefined },
+        cake: {
+          category: d.cake.category,
+          flavour: d.cake.flavour,
+          weightInPounds: d.cake.weightInPounds ?? undefined,
+          quantity: d.cake.quantity ?? undefined,
+        },
+        occasion: d.occasion ?? undefined,
+        customInstructions: d.customInstructions ?? undefined,
+        delivery: {
+          type: d.delivery.type === 'delivery' ? 'delivery' : 'pickup',
+          date: d.delivery.date,
+          time: d.delivery.time ?? undefined,
+          charge: d.delivery.charge ?? undefined,
+        },
+        payment: {
+          totalPrice,
+          advancePaid: amount,
+        },
+        referencePhotoUrl: d.referencePhotoUrl,
+        internalNotes: d.internalNotes ?? undefined,
+        customFields: d.customFields && d.customFields.length > 0 ? d.customFields : undefined,
+      });
+      const orderNumber = recordPaymentOrderNumber;
+      closeRecordPayment();
+      refreshAfterPaymentChange(orderNumber);
+    } catch (err: any) {
+      setRecordPaymentError(err.message || 'Failed to update payment.');
+    } finally {
+      setRecordPaymentSubmitting(false);
+    }
+  };
 
   // Fetch real customers list. The "Sort by" control in the mock is
   // display-only (no dropdown wired, never was) — kept that way, but the
@@ -2628,6 +2810,14 @@ export default function Webapp() {
                                 </span>
 
                                 <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); openRecordPayment(o.orderNumber); }}
+                                    title="Record Payment"
+                                    className="inline-flex items-center justify-center w-7 h-7 rounded-full border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--accent)] hover:border-[var(--accent)]/40 hover:bg-[var(--accent)]/5 cursor-pointer shrink-0"
+                                  >
+                                    <Wallet size={13} />
+                                  </button>
+
                                   {paymentStatus !== 'Paid' && (
                                     <button
                                       onClick={(e) => { e.stopPropagation(); sendPaymentReminder(o.orderId); }}
@@ -4367,6 +4557,18 @@ export default function Webapp() {
                               <div className="flex justify-between text-xs py-1 border-t border-[var(--border)]/50 mt-1 pt-2"><span className="text-[var(--text-secondary)]">Balance Due</span><span className="font-bold text-[var(--accent)]">₹{selectedOrderDetail.payment.balanceDue.toLocaleString('en-IN')}</span></div>
                               <span className="inline-block mt-2 text-[10px] font-bold px-2.5 py-1 rounded-full bg-neutral-50 dark:bg-neutral-900 border border-[var(--border)]">{selectedOrderDetail.payment.paymentStatus}</span>
                             </div>
+
+                            {/* Record Payment — deliberately its own
+                                prominent action, not buried inside Edit
+                                Order, for the common "customer just paid"
+                                case. */}
+                            <button
+                              type="button"
+                              onClick={() => openRecordPayment(selectedOrderDetail.orderId)}
+                              className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-2xl text-xs font-bold border border-[var(--accent)]/30 bg-[var(--accent)]/10 text-[var(--accent)] hover:bg-[var(--accent)]/15 cursor-pointer"
+                            >
+                              <Wallet size={14} /> Record Payment
+                            </button>
 
                             {/* Share Receipt — only shown when the baker has
                                 whatsappReceiptEnabled on their profile; the
@@ -6564,6 +6766,160 @@ export default function Webapp() {
                       </div>
                     )}
 
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            {/* Record Payment — an independent overlay (its own state, not
+                an activeSheet value) so it can stack on top of either the
+                Orders list tab or the Order Detail sheet without navigating
+                away from whichever one it was opened from. */}
+            <AnimatePresence>
+              {recordPaymentOrderNumber && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/45 backdrop-blur-sm">
+                  <div className="absolute inset-0" onClick={() => !recordPaymentSubmitting && closeRecordPayment()} />
+                  <motion.div
+                    initial={{ scale: 0.95, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.95, opacity: 0 }}
+                    transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+                    className="bg-[var(--surface)] w-full max-w-sm mx-auto max-h-[85%] overflow-y-auto no-scrollbar border border-[var(--border)] shadow-2xl relative z-10 p-6 rounded-[28px]"
+                  >
+                    <div className="flex justify-between items-center mb-5">
+                      <h3 className="font-serif text-lg font-bold">Record Payment</h3>
+                      <button
+                        onClick={closeRecordPayment}
+                        disabled={recordPaymentSubmitting}
+                        className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 disabled:opacity-50 cursor-pointer"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+
+                    {recordPaymentLoading && (
+                      <div className="py-10 flex justify-center">
+                        <span className="w-6 h-6 border-2 border-[var(--accent)]/30 border-t-[var(--accent)] rounded-full animate-spin" />
+                      </div>
+                    )}
+
+                    {!recordPaymentLoading && recordPaymentLoadError && (
+                      <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2.5 rounded-xl text-xs font-medium flex items-center gap-2">
+                        <AlertCircle size={13} /> {recordPaymentLoadError}
+                      </div>
+                    )}
+
+                    {!recordPaymentLoading && recordPaymentDetail && (
+                      <>
+                        {/* Read-only context — total/paid/balance/status */}
+                        <div className="bg-[var(--background)] p-4 rounded-2xl border border-[var(--border)] mb-5">
+                          <p className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">
+                            {recordPaymentOrderNumber} • {recordPaymentDetail.customer.name}
+                          </p>
+                          <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Total</span><span className="font-bold">₹{recordPaymentDetail.payment.totalPrice.toLocaleString('en-IN')}</span></div>
+                          <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Paid So Far</span><span className="font-bold">₹{recordPaymentDetail.payment.advancePaid.toLocaleString('en-IN')}</span></div>
+                          <div className="flex justify-between text-xs py-1 border-t border-[var(--border)]/50 mt-1 pt-2"><span className="text-[var(--text-secondary)]">Balance Due</span><span className="font-bold text-[var(--accent)]">₹{recordPaymentDetail.payment.balanceDue.toLocaleString('en-IN')}</span></div>
+                          <span className={`inline-block mt-2 text-[10px] font-bold px-2.5 py-1 rounded-full border ${recordPaymentDetail.payment.paymentStatus === 'Paid'
+                            ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-200/50'
+                            : recordPaymentDetail.payment.paymentStatus === 'Unpaid'
+                              ? 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border-red-200/50'
+                              : 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200/50'
+                            }`}>
+                            {recordPaymentDetail.payment.paymentStatus}
+                          </span>
+                        </div>
+
+                        {recordPaymentDetail.payment.balanceDue > 0 ? (
+                          <div className="flex flex-col gap-3 mb-2">
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">Add Payment</label>
+                            <div className="relative">
+                              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-bold text-[var(--text-secondary)]">₹</span>
+                              <input
+                                type="number"
+                                inputMode="decimal"
+                                min="0"
+                                step="0.01"
+                                value={recordPaymentAddAmount}
+                                onChange={(e) => setRecordPaymentAddAmount(e.target.value)}
+                                placeholder="0"
+                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 pl-8 pr-4 text-sm outline-none focus:border-[var(--accent)] font-bold"
+                              />
+                            </div>
+                            <select
+                              value={recordPaymentMethod}
+                              onChange={(e) => setRecordPaymentMethod(e.target.value as typeof recordPaymentMethod)}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none"
+                            >
+                              {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m.replace('_', ' ')}</option>)}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={handleAddPayment}
+                              disabled={recordPaymentSubmitting}
+                              className="w-full py-3 rounded-2xl text-xs font-bold bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              {recordPaymentSubmitting ? 'Saving…' : 'Save Payment'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleMarkFullyPaid}
+                              disabled={recordPaymentSubmitting}
+                              className="w-full py-2.5 rounded-2xl text-xs font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-1.5"
+                            >
+                              <CheckCircle2 size={13} /> Mark as Fully Paid (₹{recordPaymentDetail.payment.balanceDue.toLocaleString('en-IN')})
+                            </button>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-2 mb-2">This order is fully paid.</p>
+                        )}
+
+                        {/* Secondary, visually de-emphasized correction path
+                            — collapsed behind a text link by default so it
+                            isn't the default way to log a normal payment. */}
+                        <div className="mt-4 pt-4 border-t border-[var(--border)]/50">
+                          {!recordPaymentDirectMode ? (
+                            <button
+                              type="button"
+                              onClick={() => setRecordPaymentDirectMode(true)}
+                              className="text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] underline cursor-pointer"
+                            >
+                              Made a mistake? Edit amount directly
+                            </button>
+                          ) : (
+                            <div className="flex flex-col gap-2">
+                              <label className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">Edit Amount Directly</label>
+                              <p className="text-[10.5px] text-[var(--text-secondary)] -mt-1">Overwrites the amount paid so far. For corrections, not normal payment logging.</p>
+                              <div className="relative">
+                                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-bold text-[var(--text-secondary)]">₹</span>
+                                <input
+                                  type="number"
+                                  inputMode="decimal"
+                                  min="0"
+                                  step="0.01"
+                                  value={recordPaymentDirectAmount}
+                                  onChange={(e) => setRecordPaymentDirectAmount(e.target.value)}
+                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 pl-8 pr-4 text-sm outline-none focus:border-[var(--accent)] font-bold"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                onClick={handleDirectEditPayment}
+                                disabled={recordPaymentSubmitting}
+                                className="w-full py-2.5 rounded-xl text-[11px] font-bold border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                {recordPaymentSubmitting ? 'Saving…' : 'Overwrite Amount Paid'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {recordPaymentError && (
+                          <div className="mt-3 bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                            <AlertCircle size={12} /> {recordPaymentError}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </motion.div>
                 </div>
               )}
