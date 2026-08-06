@@ -4009,6 +4009,7 @@ export default function Webapp() {
                                 innerRadius={48}
                                 outerRadius={76}
                                 paddingAngle={2}
+                                isAnimationActive={false}
                               >
                                 {analyticsCategoryData.map((entry) => (
                                   <Cell key={entry.category} fill={EXPENSE_CATEGORY_COLORS[entry.category] ?? EXPENSE_CATEGORY_FALLBACK_COLOR} />
