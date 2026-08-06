@@ -22,6 +22,10 @@ import {
   haversineDistanceKm,
 } from '@/lib/marketplace/client';
 import { useAddToCart } from '@/lib/marketplace/useAddToCart';
+import {
+  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+} from 'recharts';
 import type {
   Wholesaler, WholesaleProduct, WholesalerPolicies, WholesaleCart,
   PlaceOrderResponse, OrderStatusResponse, BakerOrderListItem, FulfilmentMode, OrderItem,
@@ -96,6 +100,14 @@ function derivePaymentStatus(totalPrice: number, balanceDue: number): PaymentSta
   return 'Partially Paid';
 }
 
+// "2026-03" -> "Mar '26" — compact enough for 6 side-by-side labels on a
+// phone-width chart axis.
+function formatAnalyticsMonthLabel(monthStr: string): string {
+  const [year, month] = monthStr.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, 1));
+  return date.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }) + ` '${String(year).slice(2)}`;
+}
+
 interface OrdersPagination {
   page: number;
   limit: number;
@@ -132,6 +144,37 @@ interface RealCustomerProfileOrder {
 // 'Decoration'/'Equipment'), which doesn't match.
 const REAL_INVESTMENT_CATEGORIES = ['ingredients', 'packaging', 'delivery', 'utilities', 'equipment'] as const;
 type RealInvestmentCategory = typeof REAL_INVESTMENT_CATEGORIES[number];
+
+// GET /api/analytics/summary — backs the Finance Analytics section below
+// the Expense Ledger. months is a trailing window including the current
+// month; months=1 doubles as "this month only" for the category chart.
+interface AnalyticsMonthly {
+  month: string; // YYYY-MM
+  revenue: number;
+  expenses: number;
+  profit: number;
+  orderCount: number;
+}
+interface AnalyticsCategoryEntry {
+  category: string;
+  amount: number;
+}
+
+// The Expense Ledger itself has no color scheme (just a neutral badge per
+// entry — see the "Recent Purchases" list) — this is a new, tasteful
+// palette for the category pie chart specifically, not a reuse of an
+// existing one. 'other' plus a neutral fallback cover any category value
+// beyond the 5 the Log Expense form's dropdown currently offers, since the
+// backend accepts any free-text category string.
+const EXPENSE_CATEGORY_COLORS: Record<string, string> = {
+  ingredients: '#D97706',
+  packaging: '#0D9488',
+  delivery: '#2563EB',
+  utilities: '#7C3AED',
+  equipment: '#DB2777',
+  other: '#78716C',
+};
+const EXPENSE_CATEGORY_FALLBACK_COLOR = '#A8A29E';
 
 interface RealInvestmentEntry {
   id: string;
@@ -750,6 +793,20 @@ export default function Webapp() {
   const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
   const [logExpenseSubmitting, setLogExpenseSubmitting] = useState(false);
   const [logExpenseError, setLogExpenseError] = useState<string | null>(null);
+
+  // Finance Analytics (below the Expense Ledger) — real GET
+  // /api/analytics/summary. Trend (charts 1 & 3) is always the trailing
+  // 6 months; the category breakdown (chart 2) is fetched separately,
+  // re-fetched whenever its own month/6-month toggle changes, since the
+  // backend only returns an aggregate total per category for the whole
+  // requested window, not broken out per month.
+  const [analyticsTrend, setAnalyticsTrend] = useState<AnalyticsMonthly[] | null>(null);
+  const [analyticsTrendLoading, setAnalyticsTrendLoading] = useState(false);
+  const [analyticsTrendError, setAnalyticsTrendError] = useState<string | null>(null);
+  const [analyticsCategoryWindow, setAnalyticsCategoryWindow] = useState<'month' | '6months'>('month');
+  const [analyticsCategoryData, setAnalyticsCategoryData] = useState<AnalyticsCategoryEntry[] | null>(null);
+  const [analyticsCategoryLoading, setAnalyticsCategoryLoading] = useState(false);
+  const [analyticsCategoryError, setAnalyticsCategoryError] = useState<string | null>(null);
 
   // Real menu items (GET /api/menu-items) — backs the "My Menu" sheet.
   const [menuItemsList, setMenuItemsList] = useState<RealMenuItem[]>([]);
@@ -1503,6 +1560,46 @@ export default function Webapp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, activeTab, investmentsPage]);
+
+  // Finance Analytics — revenue/expenses/profit + order-count trend, always
+  // the trailing 6 months (charts 1 & 3 share this one fetch/window).
+  const fetchAnalyticsTrend = useCallback(() => {
+    setAnalyticsTrendLoading(true);
+    setAnalyticsTrendError(null);
+    api
+      .get<{ success: boolean; data: { months: AnalyticsMonthly[] } }>('/api/analytics/summary?months=6')
+      .then((res) => setAnalyticsTrend(res.data.months))
+      .catch((err: any) => setAnalyticsTrendError(err.message || 'Failed to load analytics.'))
+      .finally(() => setAnalyticsTrendLoading(false));
+  }, []);
+
+  // Expense-category breakdown (chart 2) — separate fetch, re-run whenever
+  // the month/6-month toggle changes, since the category totals the
+  // backend returns are scoped to whatever window was requested.
+  const fetchAnalyticsCategory = useCallback(() => {
+    setAnalyticsCategoryLoading(true);
+    setAnalyticsCategoryError(null);
+    const months = analyticsCategoryWindow === 'month' ? 1 : 6;
+    api
+      .get<{ success: boolean; data: { expensesByCategory: AnalyticsCategoryEntry[] } }>(
+        `/api/analytics/summary?months=${months}`,
+      )
+      .then((res) => setAnalyticsCategoryData(res.data.expensesByCategory))
+      .catch((err: any) => setAnalyticsCategoryError(err.message || 'Failed to load category breakdown.'))
+      .finally(() => setAnalyticsCategoryLoading(false));
+  }, [analyticsCategoryWindow]);
+
+  useEffect(() => {
+    if (step === 'dashboard' && activeTab === 'expenses') {
+      fetchAnalyticsTrend();
+    }
+  }, [step, activeTab, fetchAnalyticsTrend]);
+
+  useEffect(() => {
+    if (step === 'dashboard' && activeTab === 'expenses') {
+      fetchAnalyticsCategory();
+    }
+  }, [step, activeTab, fetchAnalyticsCategory]);
 
   useEffect(() => {
     if (step === 'dashboard' && activeTab === 'supply') {
@@ -3825,6 +3922,136 @@ export default function Webapp() {
                       )}
                     </div>
 
+                  </div>
+
+                  {/* --- FINANCE ANALYTICS — directly below the Expense
+                      Ledger, per scope: exactly 3 charts (revenue/expenses/
+                      profit trend, expense-category breakdown, order-volume
+                      trend), nothing else in this pass. --- */}
+                  <div className="mt-10">
+                    <h3 className="font-serif text-xl md:text-2xl font-bold text-[var(--text-primary)] mb-1">Analytics</h3>
+                    <p className="text-xs text-[var(--text-secondary)] mb-5">Based on delivery date and expense logs.</p>
+
+                    <div className="flex flex-col gap-6">
+
+                      {/* Chart 1: Revenue / Expenses / Profit trend (6 months) */}
+                      <div className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] shadow-sm p-5">
+                        <h4 className="font-serif font-bold text-sm mb-4">Revenue, Expenses &amp; Profit</h4>
+                        <p className="text-[10px] text-[var(--text-secondary)] mb-3 -mt-2">Last 6 months</p>
+                        {analyticsTrendLoading ? (
+                          <div className="h-[220px] bg-[var(--text-primary)]/8 rounded-xl animate-pulse" />
+                        ) : analyticsTrendError ? (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-xs font-medium flex items-center gap-2">
+                            <AlertCircle size={13} /> {analyticsTrendError}
+                          </div>
+                        ) : !analyticsTrend || analyticsTrend.every((m) => m.revenue === 0 && m.expenses === 0) ? (
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-16">Not enough data yet — this fills in as you log orders and expenses.</p>
+                        ) : (
+                          <ResponsiveContainer width="100%" height={240}>
+                            <LineChart data={analyticsTrend} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                              <XAxis dataKey="month" tickFormatter={formatAnalyticsMonthLabel} tick={{ fontSize: 10 }} />
+                              <YAxis
+                                tick={{ fontSize: 10 }}
+                                width={40}
+                                tickFormatter={(v: number) => (v >= 1000 ? `${Math.round(v / 1000)}k` : `${v}`)}
+                              />
+                              <Tooltip
+                                formatter={(value) => `₹${Number(value).toLocaleString('en-IN')}`}
+                                labelFormatter={(label) => formatAnalyticsMonthLabel(String(label))}
+                                contentStyle={{ fontSize: 12, borderRadius: 12 }}
+                              />
+                              <Legend wrapperStyle={{ fontSize: 11 }} />
+                              <Line type="monotone" dataKey="revenue" name="Revenue" stroke="#16A34A" strokeWidth={2} dot={{ r: 3 }} />
+                              <Line type="monotone" dataKey="expenses" name="Expenses" stroke="#DC2626" strokeWidth={2} dot={{ r: 3 }} />
+                              <Line type="monotone" dataKey="profit" name="Profit" stroke="#2563EB" strokeWidth={2} dot={{ r: 3 }} />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        )}
+                      </div>
+
+                      {/* Chart 2: Expense breakdown by category */}
+                      <div className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] shadow-sm p-5">
+                        <div className="flex justify-between items-center mb-4 gap-2 flex-wrap">
+                          <h4 className="font-serif font-bold text-sm">Expenses by Category</h4>
+                          <div className="flex items-center bg-[var(--background)] rounded-full border border-[var(--border)] p-0.5">
+                            <button
+                              onClick={() => setAnalyticsCategoryWindow('month')}
+                              className={`px-3 py-1 rounded-full text-[10.5px] font-bold transition-all cursor-pointer ${analyticsCategoryWindow === 'month' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'}`}
+                            >
+                              This Month
+                            </button>
+                            <button
+                              onClick={() => setAnalyticsCategoryWindow('6months')}
+                              className={`px-3 py-1 rounded-full text-[10.5px] font-bold transition-all cursor-pointer ${analyticsCategoryWindow === '6months' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'}`}
+                            >
+                              6 Months
+                            </button>
+                          </div>
+                        </div>
+                        {analyticsCategoryLoading ? (
+                          <div className="h-[220px] bg-[var(--text-primary)]/8 rounded-xl animate-pulse" />
+                        ) : analyticsCategoryError ? (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-xs font-medium flex items-center gap-2">
+                            <AlertCircle size={13} /> {analyticsCategoryError}
+                          </div>
+                        ) : !analyticsCategoryData || analyticsCategoryData.length === 0 ? (
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-16">
+                            No expenses logged {analyticsCategoryWindow === 'month' ? 'this month' : 'in the last 6 months'} yet.
+                          </p>
+                        ) : (
+                          <ResponsiveContainer width="100%" height={260}>
+                            <PieChart>
+                              <Pie
+                                data={analyticsCategoryData}
+                                dataKey="amount"
+                                nameKey="category"
+                                innerRadius={48}
+                                outerRadius={76}
+                                paddingAngle={2}
+                                isAnimationActive={false}
+                              >
+                                {analyticsCategoryData.map((entry) => (
+                                  <Cell key={entry.category} fill={EXPENSE_CATEGORY_COLORS[entry.category] ?? EXPENSE_CATEGORY_FALLBACK_COLOR} />
+                                ))}
+                              </Pie>
+                              <Tooltip formatter={(value) => `₹${Number(value).toLocaleString('en-IN')}`} contentStyle={{ fontSize: 12, borderRadius: 12 }} />
+                              <Legend wrapperStyle={{ fontSize: 10.5, textTransform: 'capitalize', paddingTop: 8 }} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                        )}
+                      </div>
+
+                      {/* Chart 3: Order volume trend (same 6-month window as chart 1) */}
+                      <div className="bg-[var(--surface)] rounded-[24px] border border-[var(--border)] shadow-sm p-5">
+                        <h4 className="font-serif font-bold text-sm mb-4">Order Volume</h4>
+                        <p className="text-[10px] text-[var(--text-secondary)] mb-3 -mt-2">Last 6 months</p>
+                        {analyticsTrendLoading ? (
+                          <div className="h-[200px] bg-[var(--text-primary)]/8 rounded-xl animate-pulse" />
+                        ) : analyticsTrendError ? (
+                          <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-xs font-medium flex items-center gap-2">
+                            <AlertCircle size={13} /> {analyticsTrendError}
+                          </div>
+                        ) : !analyticsTrend || analyticsTrend.every((m) => m.orderCount === 0) ? (
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-16">Not enough data yet — this fills in as you take orders.</p>
+                        ) : (
+                          <ResponsiveContainer width="100%" height={200}>
+                            <BarChart data={analyticsTrend} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                              <XAxis dataKey="month" tickFormatter={formatAnalyticsMonthLabel} tick={{ fontSize: 10 }} />
+                              <YAxis tick={{ fontSize: 10 }} width={28} allowDecimals={false} />
+                              <Tooltip
+                                formatter={(value) => `${value} order${Number(value) === 1 ? '' : 's'}`}
+                                labelFormatter={(label) => formatAnalyticsMonthLabel(String(label))}
+                                contentStyle={{ fontSize: 12, borderRadius: 12 }}
+                              />
+                              <Bar dataKey="orderCount" name="Orders" fill="var(--accent)" radius={[6, 6, 0, 0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        )}
+                      </div>
+
+                    </div>
                   </div>
 
                 </div>
