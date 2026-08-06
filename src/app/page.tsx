@@ -1029,13 +1029,6 @@ export default function Webapp() {
     }
   };
 
-  useEffect(() => {
-    if (showCheckout && cart?.wholesalerId) {
-      const wholesaler = wholesalers.find((w) => w.id === cart.wholesalerId);
-      setCheckoutFulfillment(wholesaler?.deliveryEnabled ? 'Delivery' : 'Pickup');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showCheckout]);
 
   const resetCheckoutState = () => {
     setShowCheckout(false);
@@ -1989,11 +1982,15 @@ export default function Webapp() {
   // Estimate only, for display before placing - the server computes the
   // real charge at order time (see bakery-api-reference.md endpoint 4).
   // Free-delivery threshold, if the wholesaler has one, waives the charge.
+  // deliveryCharge/freeDeliveryThreshold are nullable on the backend
+  // (unset for a wholesaler that's never configured delivery) even though
+  // WholesalerPolicies types them as plain numbers - `?? 0` guards against
+  // that mismatch rather than trusting the type.
   const checkoutDeliveryFee =
     checkoutFulfillment === 'Delivery' && cartPolicies
-      ? cartPolicies.freeDeliveryThreshold > 0 && cartSubtotal >= cartPolicies.freeDeliveryThreshold
+      ? (cartPolicies.freeDeliveryThreshold ?? 0) > 0 && cartSubtotal >= (cartPolicies.freeDeliveryThreshold ?? 0)
         ? 0
-        : cartPolicies.deliveryCharge
+        : (cartPolicies.deliveryCharge ?? 0)
       : 0;
 
   // Only RECEIVED and CANCELLED are confirmed values so far (see
@@ -6202,7 +6199,19 @@ export default function Webapp() {
                             </div>
 
                             <button
-                              onClick={() => setShowCheckout(true)}
+                              onClick={() => {
+                                // Set together, synchronously, so the very
+                                // first Checkout render already reflects the
+                                // right mode - splitting this into a
+                                // useEffect that runs after showCheckout
+                                // flips true left one render where
+                                // checkoutFulfillment was still its stale
+                                // 'Delivery' default even for a pickup-only
+                                // wholesaler, which crashed checkoutDeliveryFee
+                                // against that wholesaler's null deliveryCharge.
+                                setCheckoutFulfillment(cartWholesaler?.deliveryEnabled ? 'Delivery' : 'Pickup');
+                                setShowCheckout(true);
+                              }}
                               disabled={!cartMeetsMinimum || cartPoliciesLoading}
                               className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-neutral-400 disabled:cursor-not-allowed text-white h-[54px] rounded-2xl font-bold text-sm mt-5 shrink-0 active:scale-[0.98] transition-all shadow-md cursor-pointer"
                             >
