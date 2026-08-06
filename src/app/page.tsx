@@ -17,7 +17,7 @@ import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } f
 import { api } from '@/lib/api';
 import {
   fetchWholesalers, fetchCatalogue, fetchPolicies,
-  fetchCart, getDefaultVariant, getDisplayPrice, getDisplayUnitLabel, getCartSubtotal,
+  fetchCart, getDefaultVariant, getDisplayPrice, getDisplayUnitLabel, getCartSubtotal, getCartItemQuantity,
   updateCartItemQuantity, removeCartItem, placeOrder, fetchOrderStatus, fetchBakerOrders,
   haversineDistanceKm,
 } from '@/lib/marketplace/client';
@@ -1348,6 +1348,17 @@ export default function Webapp() {
       setJustAddedProductId(product.id);
       setTimeout(() => setJustAddedProductId((id) => (id === product.id ? null : id)), 1200);
     }
+  };
+
+  // Catalogue-card +/- once the item is already in the cart (quantity > 0)
+  // - reuses the same cart-mutation primitive as the Cart screen's own
+  // steppers (handleCartQuantityChange) rather than duplicating it, and
+  // flashes the same justAddedProductId confirmation used on first-add so
+  // every quantity change gets visible feedback, not just the initial tap.
+  const handleCatalogueStepperChange = async (productId: string, variantId: string | null, quantity: number) => {
+    await handleCartQuantityChange(productId, variantId, quantity);
+    setJustAddedProductId(productId);
+    setTimeout(() => setJustAddedProductId((id) => (id === productId ? null : id)), 700);
   };
 
   // Real menu items (GET /api/menu-items) — fetched whenever the "My Menu"
@@ -5695,34 +5706,78 @@ export default function Webapp() {
                               <div className="h-16 bg-[var(--text-primary)]/8 rounded-xl animate-pulse mb-6" />
                             )}
 
-                            <div className="mt-auto pt-4 flex items-center gap-3">
-                              <div className="flex items-center bg-[var(--background)] rounded-xl border border-[var(--border)] h-[54px] px-1 shrink-0">
-                                <button
-                                  onClick={() => setProductDetailQuantity((q) => Math.max(1, q - 1))}
-                                  className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer"
-                                >
-                                  <Minus size={16} />
-                                </button>
-                                <span className="w-8 text-center text-sm font-bold text-[var(--text-primary)]">{productDetailQuantity}</span>
-                                <button
-                                  onClick={() => setProductDetailQuantity((q) => q + 1)}
-                                  className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer"
-                                >
-                                  <Plus size={16} />
-                                </button>
-                              </div>
-                              <button
-                                onClick={handleAddSelectedProductToCart}
-                                disabled={selectedProduct.stockStatus === 'Out of Stock'}
-                                className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-neutral-400 disabled:cursor-not-allowed text-white h-[54px] rounded-xl font-bold text-sm flex items-center justify-center gap-2 active:scale-[0.98] transition-all shadow-md cursor-pointer"
-                              >
-                                {productDetailAdded ? (
-                                  <><Check size={18} /> Added to Cart</>
-                                ) : (
-                                  <><ShoppingCart size={18} /> Add to Cart – ₹{(getDisplayPrice(selectedProduct, selectedVariant) * productDetailQuantity).toLocaleString('en-IN')}</>
-                                )}
-                              </button>
-                            </div>
+                            {(() => {
+                              // Detail's stepper mirrors real cart quantity for the
+                              // selected variant (single source of truth with the
+                              // Catalogue card) once it's actually in the cart -
+                              // productDetailQuantity only drives the pre-add "how
+                              // many to add first" picker below that point.
+                              const detailVariantId = selectedVariant?.id ?? null;
+                              const detailCartQty = getCartItemQuantity(cart, selectedProduct.id, detailVariantId);
+                              const detailKey = `${selectedProduct.id}:${detailVariantId ?? ''}`;
+                              const detailUpdating = cartUpdatingKey === detailKey;
+
+                              return (
+                                <div className="mt-auto pt-4 flex items-center gap-3">
+                                  {detailCartQty > 0 ? (
+                                    <>
+                                      <div className="flex items-center bg-[var(--background)] rounded-xl border border-[var(--border)] h-[54px] px-1 shrink-0">
+                                        <button
+                                          onClick={() => handleCartQuantityChange(selectedProduct.id, detailVariantId, detailCartQty - 1)}
+                                          disabled={detailUpdating}
+                                          className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer disabled:opacity-50"
+                                        >
+                                          <Minus size={16} />
+                                        </button>
+                                        <span className="w-8 text-center text-sm font-bold text-[var(--text-primary)]">{detailCartQty}</span>
+                                        <button
+                                          onClick={() => handleCartQuantityChange(selectedProduct.id, detailVariantId, detailCartQty + 1)}
+                                          disabled={detailUpdating || selectedProduct.stockStatus === 'Out of Stock'}
+                                          className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer disabled:opacity-50"
+                                        >
+                                          <Plus size={16} />
+                                        </button>
+                                      </div>
+                                      <button
+                                        onClick={() => { refreshCart(); setActiveSheet('supply-cart'); }}
+                                        className="flex-1 bg-[var(--accent)]/10 text-[var(--accent)] border border-[var(--accent)]/30 h-[54px] rounded-xl font-bold text-sm flex items-center justify-center gap-2 active:scale-[0.98] transition-all cursor-pointer"
+                                      >
+                                        <Check size={18} /> In Cart · View Cart
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <div className="flex items-center bg-[var(--background)] rounded-xl border border-[var(--border)] h-[54px] px-1 shrink-0">
+                                        <button
+                                          onClick={() => setProductDetailQuantity((q) => Math.max(1, q - 1))}
+                                          className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer"
+                                        >
+                                          <Minus size={16} />
+                                        </button>
+                                        <span className="w-8 text-center text-sm font-bold text-[var(--text-primary)]">{productDetailQuantity}</span>
+                                        <button
+                                          onClick={() => setProductDetailQuantity((q) => q + 1)}
+                                          className="w-10 h-10 rounded-lg flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer"
+                                        >
+                                          <Plus size={16} />
+                                        </button>
+                                      </div>
+                                      <button
+                                        onClick={handleAddSelectedProductToCart}
+                                        disabled={selectedProduct.stockStatus === 'Out of Stock'}
+                                        className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-neutral-400 disabled:cursor-not-allowed text-white h-[54px] rounded-xl font-bold text-sm flex items-center justify-center gap-2 active:scale-[0.98] transition-all shadow-md cursor-pointer"
+                                      >
+                                        {productDetailAdded ? (
+                                          <><Check size={18} /> Added to Cart</>
+                                        ) : (
+                                          <><ShoppingCart size={18} /> Add to Cart – ₹{(getDisplayPrice(selectedProduct, selectedVariant) * productDetailQuantity).toLocaleString('en-IN')}</>
+                                        )}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </div>
                         )}
 
@@ -5805,6 +5860,11 @@ export default function Webapp() {
                               const displayPrice = getDisplayPrice(p);
                               const displayUnit = getDisplayUnitLabel(p);
                               const priceRange = p.variants.length > 1 && new Set(p.variants.map((v) => v.price)).size > 1;
+                              const defaultVariantId = getDefaultVariant(p)?.id ?? null;
+                              const cardCartQty = getCartItemQuantity(cart, p.id, defaultVariantId);
+                              const cardKey = `${p.id}:${defaultVariantId ?? ''}`;
+                              const cardUpdating = cartUpdatingKey === cardKey;
+                              const cardJustChanged = justAddedProductId === p.id;
                               return (
                                 <div
                                   key={p.id}
@@ -5845,26 +5905,70 @@ export default function Webapp() {
                                           {priceRange ? 'From ' : ''}₹{displayPrice.toLocaleString('en-IN')} <span className="text-[10px] text-[var(--text-secondary)] font-normal">/ {displayUnit}</span>
                                         </p>
                                       </div>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); handleAddProductToCart(p); }}
-                                        disabled={stockStatus === 'Out of Stock' || addingProductId === p.id}
-                                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shrink-0 ${stockStatus === 'Out of Stock'
-                                          ? 'bg-neutral-200 dark:bg-neutral-800 text-[var(--text-secondary)] cursor-not-allowed'
-                                          : 'bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white shadow-md active:scale-95 cursor-pointer disabled:opacity-70'
-                                          }`}
-                                      >
-                                        {justAddedProductId === p.id ? (
-                                          <Check size={17} />
-                                        ) : (
-                                          <ShoppingCart size={17} />
-                                        )}
-                                      </button>
+                                      {cardCartQty > 0 ? (
+                                        <div
+                                          onClick={(e) => e.stopPropagation()}
+                                          className={`flex items-center rounded-full border h-10 px-1 shrink-0 transition-colors ${cardJustChanged ? 'bg-[var(--accent)]/10 border-[var(--accent)]' : 'bg-[var(--background)] border-[var(--border)]'}`}
+                                        >
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); handleCatalogueStepperChange(p.id, defaultVariantId, cardCartQty - 1); }}
+                                            disabled={cardUpdating}
+                                            className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer disabled:opacity-50"
+                                          >
+                                            <Minus size={14} />
+                                          </button>
+                                          <span className="w-6 text-center text-xs font-bold text-[var(--text-primary)]">{cardCartQty}</span>
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); handleCatalogueStepperChange(p.id, defaultVariantId, cardCartQty + 1); }}
+                                            disabled={cardUpdating || stockStatus === 'Out of Stock'}
+                                            className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer disabled:opacity-50 disabled:text-[var(--text-secondary)]"
+                                          >
+                                            <Plus size={14} />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); handleAddProductToCart(p); }}
+                                          disabled={stockStatus === 'Out of Stock' || addingProductId === p.id}
+                                          className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shrink-0 ${stockStatus === 'Out of Stock'
+                                            ? 'bg-neutral-200 dark:bg-neutral-800 text-[var(--text-secondary)] cursor-not-allowed'
+                                            : 'bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white shadow-md active:scale-95 cursor-pointer disabled:opacity-70'
+                                            }`}
+                                        >
+                                          {cardJustChanged ? (
+                                            <Check size={17} />
+                                          ) : (
+                                            <ShoppingCart size={17} />
+                                          )}
+                                        </button>
+                                      )}
                                     </div>
                                   </div>
                                 </div>
                               );
                             })}
                         </div>
+
+                        {/* Persistent quick-access to Cart while browsing a
+                            potentially very long (400+ item) catalogue - a
+                            deliberate true `sticky` here (not this app's usual
+                            mt-auto pinning) since it must stay reachable while
+                            scrolling this sheet's own overflow-y-auto ancestor,
+                            not just sit at the bottom of short content. Only
+                            rendered once the cart actually has items, so it
+                            never shows an empty/misleading state. */}
+                        {cart && cart.items.length > 0 && (
+                          <button
+                            onClick={() => setActiveSheet('supply-cart')}
+                            className="sticky bottom-4 mt-4 w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white rounded-2xl h-14 px-5 shadow-xl flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all z-10 shrink-0"
+                          >
+                            <span className="flex items-center gap-2 text-sm font-bold">
+                              <ShoppingCart size={18} />
+                              {cartCount} item{cartCount !== 1 ? 's' : ''} in cart
+                            </span>
+                            <span className="text-sm font-bold">₹{cartSubtotal.toLocaleString('en-IN')} · View Cart</span>
+                          </button>
+                        )}
                         </>
                         )}
                       </div>

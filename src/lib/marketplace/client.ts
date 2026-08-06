@@ -153,6 +153,18 @@ export function getCartSubtotal(c: WholesaleCart): number {
 }
 
 /**
+ * Single source of truth for "how many of this exact product+variant are
+ * already in the cart" - Catalogue cards and Product Detail both derive
+ * their displayed stepper quantity from this rather than keeping their
+ * own counters, so the two screens can never disagree.
+ */
+export function getCartItemQuantity(c: WholesaleCart | null, productId: string, variantId: string | null): number {
+  if (!c) return 0;
+  const key = lineKey(productId, variantId);
+  return c.items.find((item) => lineKey(item.product.id, item.variant?.id ?? null) === key)?.quantity ?? 0;
+}
+
+/**
  * Throws CartWholesalerConflictError if product belongs to a different
  * wholesaler than what's already in the cart and options.force isn't
  * set - the caller must confirm with the baker and retry with
