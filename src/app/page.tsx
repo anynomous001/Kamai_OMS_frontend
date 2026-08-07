@@ -11,7 +11,7 @@ import {
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
   UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy,
   Share2, Download, Store, Truck, Clock,
-  ArrowUpDown, ShoppingCart, Minus, MapPin, RotateCcw
+  ArrowUpDown, ShoppingCart, Minus, MapPin, RotateCcw, TrendingUp
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -326,6 +326,14 @@ export default function Webapp() {
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
+
+  // This month's revenue/profit — reuses GET /api/analytics/summary?months=1
+  // (the Finance Analytics endpoint) rather than adding a second, separately
+  // -computed "current month" figure on the dashboard endpoint itself, so
+  // this can never drift from what the Analytics section's own trend chart
+  // shows for the current month.
+  const [dashboardMonthSummary, setDashboardMonthSummary] = useState<{ revenue: number; profit: number } | null>(null);
+  const [dashboardMonthLoading, setDashboardMonthLoading] = useState(false);
 
   // Email login fields
   const [email, setEmail] = useState('');
@@ -762,6 +770,7 @@ export default function Webapp() {
       // openOrderDetail re-fetches the full detail (the PUT response only
       // returns a partial shape) and re-opens the sheet with fresh data.
       fetchDashboardSummary();
+      fetchDashboardMonthSummary();
       fetchOrdersList();
       openOrderDetail(editOrderNumber);
     } catch (err: any) {
@@ -1295,6 +1304,26 @@ export default function Webapp() {
       fetchDashboardSummary();
     }
   }, [step, fetchDashboardSummary]);
+
+  // Only needed on the Home tab (where the KPI cards render), so scoped
+  // tighter than fetchDashboardSummary above rather than fetched on every
+  // app entry regardless of which tab is actually open.
+  const fetchDashboardMonthSummary = useCallback(() => {
+    setDashboardMonthLoading(true);
+    api
+      .get<{ success: boolean; data: { months: { revenue: number; profit: number }[] } }>(
+        '/api/analytics/summary?months=1',
+      )
+      .then((res) => setDashboardMonthSummary(res.data.months[0] ?? { revenue: 0, profit: 0 }))
+      .catch(() => setDashboardMonthSummary(null))
+      .finally(() => setDashboardMonthLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (step === 'dashboard' && activeTab === 'home') {
+      fetchDashboardMonthSummary();
+    }
+  }, [step, activeTab, fetchDashboardMonthSummary]);
 
   // Fetch real orders list. Extracted as a stable callback (not just inline
   // in the effect below) so it can also be called directly right after
@@ -2210,6 +2239,7 @@ export default function Webapp() {
       // Dashboard (and Orders, if that's the tab the sheet was opened
       // from) won't re-run their effects just because a sheet closed.
       fetchDashboardSummary();
+      fetchDashboardMonthSummary();
       fetchOrdersList();
     } catch (err: any) {
       setNewOrderError(err.message || 'Failed to create order.');
@@ -2599,6 +2629,50 @@ export default function Webapp() {
                             <span className="text-3xl font-extrabold tracking-tight">{dashboardSummary?.todayDeliveries ?? 0} Orders</span>
                           )}
                           <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">Scheduled for delivery today</p>
+                        </div>
+                      </div>
+
+                      {/* This Month's Revenue Card — real GET
+                          /api/analytics/summary?months=1, same figure the
+                          Finance Analytics trend chart shows for the
+                          current month. */}
+                      <div
+                        onClick={() => setActiveTab('expenses')}
+                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                      >
+                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
+                          <span>This Month&apos;s Revenue</span>
+                          <ArrowUpRight size={16} className="text-[var(--accent)]" />
+                        </div>
+                        <div className="mt-4">
+                          {dashboardMonthLoading ? (
+                            <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
+                          ) : (
+                            <span className="text-3xl font-extrabold tracking-tight">₹{(dashboardMonthSummary?.revenue ?? 0).toLocaleString('en-IN')}</span>
+                          )}
+                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">From non-cancelled orders this month</p>
+                        </div>
+                      </div>
+
+                      {/* This Month's Profit Card — same endpoint, revenue
+                          minus logged expenses for the current month. */}
+                      <div
+                        onClick={() => setActiveTab('expenses')}
+                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                      >
+                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
+                          <span>This Month&apos;s Profit</span>
+                          <TrendingUp size={16} className="text-[var(--accent)]" />
+                        </div>
+                        <div className="mt-4">
+                          {dashboardMonthLoading ? (
+                            <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
+                          ) : (
+                            <span className={`text-3xl font-extrabold tracking-tight ${(dashboardMonthSummary?.profit ?? 0) < 0 ? 'text-red-600 dark:text-red-400' : ''}`}>
+                              ₹{(dashboardMonthSummary?.profit ?? 0).toLocaleString('en-IN')}
+                            </span>
+                          )}
+                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">Revenue minus expenses this month</p>
                         </div>
                       </div>
 
