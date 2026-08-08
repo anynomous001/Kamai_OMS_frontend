@@ -280,6 +280,13 @@ interface RealBillingStatus {
   trialEndDate: string | null;
   nextBillingDate: string | null;
   autoRenew: boolean;
+  // The price this baker actually locked in at subscription creation time
+  // (null if they've never had a subscription created). Always display
+  // this instead of a hardcoded price once it's set.
+  lockedMonthlyPrice: number | null;
+  // What a brand-new subscriber would be offered right now.
+  currentOfferPrice: number;
+  spotsRemaining: number;
 }
 
 interface RealCustomerProfile {
@@ -871,16 +878,27 @@ export default function Webapp() {
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
 
   // POST /api/billing/create-subscription — a real Razorpay subscription
-  // creation call. This environment's RAZORPAY_KEY_ID is a LIVE key
-  // (rzp_live_...), not a test key, so this was wired but deliberately
-  // NOT click-tested during verification — see the report for why.
+  // creation call. Creating the mandate server-side only reserves it as
+  // PENDING; the baker still has to actually authorize it on Razorpay's
+  // hosted checkout page (checkoutUrl) via their own UPI app/PIN, which is
+  // why this redirects instead of just closing the sheet.
   const handleConfirmSubscription = async () => {
     setSubscriptionSubmitting(true);
     setSubscriptionError(null);
     try {
-      await api.post('/api/billing/create-subscription', { plan: 'EARLY_ADOPTER' });
+      const res = await api.post<{ success: boolean; data: { checkoutUrl: string | null } }>(
+        '/api/billing/create-subscription',
+        { plan: 'EARLY_ADOPTER' },
+      );
+      if (res.data.checkoutUrl) {
+        window.location.assign(res.data.checkoutUrl);
+        return;
+      }
+      // No checkout URL came back — nothing to redirect to, so at least
+      // reflect the new PENDING state instead of silently doing nothing.
       setActiveSheet('none');
       fetchBillingStatus();
+      fetchBakerProfile();
     } catch (err: any) {
       setSubscriptionError(err.message || 'Failed to start subscription.');
     } finally {
@@ -2379,6 +2397,31 @@ export default function Webapp() {
   const handlePrevMonth = () => shiftCalendarMonth(-1);
   const handleNextMonth = () => shiftCalendarMonth(1);
 
+  // Full-screen, unbypassable trial-expired paywall: blocks the entire app
+  // shell whenever trialEndsOn has passed and there's no ACTIVE
+  // subscription (covers TRIAL/PENDING/PAUSED/CANCELLED/EXPIRED alike, not
+  // just a literal TRIAL status — cancelling after the trial ended still
+  // means no paid access). No grace period, no partial access, no
+  // dismissal - it re-evaluates from bakerProfile.subscription, which is
+  // refetched on entering the dashboard and again right after a
+  // subscribe attempt, so it clears on its own once the webhook flips the
+  // baker to ACTIVE.
+  //
+  // Uses the server-computed trialDaysRemaining rather than comparing
+  // trialEndsOn against a client-side "now": trialEndsAt is a fixed past
+  // timestamp once set, so trialDaysRemaining reaching 0 is just as
+  // reliable a signal, without calling an impure Date.now() during render.
+  const isPaywalled =
+    bakerProfile != null &&
+    bakerProfile.subscription.status !== 'ACTIVE' &&
+    bakerProfile.subscription.trialDaysRemaining <= 0;
+
+  useEffect(() => {
+    if (isPaywalled && billingStatus === null && !billingLoading) {
+      fetchBillingStatus();
+    }
+  }, [isPaywalled, billingStatus, billingLoading, fetchBillingStatus]);
+
   return (
     <div className="min-h-screen w-full flex justify-center bg-zinc-100 dark:bg-zinc-950 transition-colors duration-300">
       <div className="noise-bg h-screen max-h-screen w-full max-w-[480px] flex flex-col bg-[var(--background)] shadow-2xl border-x border-[var(--border)] relative overflow-hidden">
@@ -2528,6 +2571,46 @@ export default function Webapp() {
         {/* 3. MAIN DASHBOARD VIEW - MOBILE ONLY */}
         {step === 'dashboard' && (
           <div className="flex-1 flex flex-col h-full relative overflow-hidden">
+
+            {/* TRIAL-EXPIRED PAYWALL — full-screen, unbypassable block.
+                Sits above sheets (z-50) and the confirm-dialog modal
+                (z-60): no close button, no backdrop-click dismiss, no way
+                to reach any tab/sheet underneath while it's up. See
+                isPaywalled above for the exact gating condition. */}
+            {isPaywalled && (
+              <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-0 md:p-6">
+                <div className="bg-[var(--surface)] w-full max-w-[480px] mx-auto h-full md:h-auto md:max-h-[90%] overflow-y-auto no-scrollbar border border-[var(--border)] shadow-2xl p-8 flex flex-col items-center text-center md:rounded-[32px]">
+                  <span className="text-5xl mb-4">⏰</span>
+                  <h3 className="font-serif text-2xl font-bold text-[var(--text-primary)]">Your free trial has ended</h3>
+                  <p className="text-sm text-[var(--text-secondary)] mt-3 leading-relaxed max-w-sm">
+                    Set up Razorpay UPI AutoPay to keep using your Kamai cockpit — orders, WhatsApp receipts, and margin tracking are paused until you subscribe.
+                  </p>
+
+                  <div className="w-full bg-[var(--background)] border border-[var(--border)] rounded-2xl p-5 mt-6">
+                    <span className="text-3xl font-extrabold block text-[var(--text-primary)]">
+                      ₹{billingStatus?.currentOfferPrice ?? 149} <span className="text-xs text-[var(--text-secondary)] font-normal">/ month</span>
+                    </span>
+                    {billingStatus && billingStatus.currentOfferPrice <= 149 && (
+                      <span className="inline-flex text-[10px] font-bold text-[var(--accent)] mt-2">{billingStatus.spotsRemaining} early-adopter spots left</span>
+                    )}
+                  </div>
+
+                  {subscriptionError && (
+                    <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2 mt-4 w-full">
+                      <AlertCircle size={13} /> {subscriptionError}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleConfirmSubscription}
+                    disabled={subscriptionSubmitting}
+                    className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-6 cursor-pointer"
+                  >
+                    {subscriptionSubmitting ? 'Starting...' : '🔒 Set Up UPI AutoPay & Continue'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* --- MOBILE NAVIGATION BAR & HEADER --- */}
             <div className="w-full flex items-center justify-between px-6 py-3 border-b border-[var(--border)] bg-[var(--background)] sticky top-0 z-30">
@@ -2685,23 +2768,34 @@ export default function Webapp() {
                       </div>
                     )}
 
-                    {/* Trial End Warning — real bakerProfile.subscription data */}
-                    {bakerProfile?.subscription.status === 'TRIAL' && (
-                      <div
-                        onClick={() => setActiveSheet('subscription-status')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all flex items-center gap-4 w-full"
-                        style={{ background: 'linear-gradient(to right, var(--surface), rgba(234, 88, 12, 0.04))' }}
-                      >
-                        <span className="text-4xl flex-shrink-0">🎂</span>
-                        <div className="flex-1 min-w-0">
-                          <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">Your free trial is ending soon.</h4>
-                          <div className="inline-flex items-center gap-1.5 bg-[var(--accent)] text-white px-3 py-1 rounded-full text-[10.5px] font-semibold mt-2">
-                            {bakerProfile.subscription.trialDaysRemaining} Days Remaining
+                    {/* Trial End Warning — real bakerProfile.subscription data.
+                        Escalates styling/copy once <= 7 days remain: with a
+                        30-day trial (down from 90), a baker who doesn't open
+                        the app daily needs a harder-to-miss signal as the
+                        deadline actually approaches, not just a constant
+                        "ending soon" banner for the whole trial. */}
+                    {bakerProfile?.subscription.status === 'TRIAL' && (() => {
+                      const daysLeft = bakerProfile.subscription.trialDaysRemaining;
+                      const isUrgent = daysLeft <= 7;
+                      return (
+                        <div
+                          onClick={() => { setActiveSheet('subscription-status'); fetchBillingStatus(); }}
+                          className={`bg-[var(--surface)] p-6 rounded-[24px] border shadow-sm cursor-pointer transition-all flex items-center gap-4 w-full ${isUrgent ? 'border-red-300 dark:border-red-800 hover:border-red-400' : 'border-[var(--border)] hover:border-[var(--accent)]'}`}
+                          style={{ background: isUrgent ? 'linear-gradient(to right, var(--surface), rgba(220, 38, 38, 0.06))' : 'linear-gradient(to right, var(--surface), rgba(234, 88, 12, 0.04))' }}
+                        >
+                          <span className="text-4xl flex-shrink-0">{isUrgent ? '⏰' : '🎂'}</span>
+                          <div className="flex-1 min-w-0">
+                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">
+                              {isUrgent ? 'Your free trial ends soon — set up AutoPay now.' : 'Your free trial is ending soon.'}
+                            </h4>
+                            <div className={`inline-flex items-center gap-1.5 text-white px-3 py-1 rounded-full text-[10.5px] font-semibold mt-2 ${isUrgent ? 'bg-red-600' : 'bg-[var(--accent)]'}`}>
+                              {daysLeft} Days Remaining
+                            </div>
                           </div>
+                          <ChevronRight size={18} className="text-[var(--text-secondary)] flex-shrink-0" />
                         </div>
-                        <ChevronRight size={18} className="text-[var(--text-secondary)] flex-shrink-0" />
-                      </div>
-                    )}
+                      );
+                    })()}
 
                   </div>
 
@@ -5377,6 +5471,12 @@ export default function Webapp() {
                                   <span className="text-xs text-[var(--text-secondary)]">Current Plan</span>
                                   <span className="text-xs font-bold">{billingStatus.plan || '—'}</span>
                                 </div>
+                                {billingStatus.lockedMonthlyPrice != null && (
+                                  <div className="flex justify-between items-center py-2 border-t border-[var(--border)]/50 mt-2.5">
+                                    <span className="text-xs text-[var(--text-secondary)]">Monthly price</span>
+                                    <span className="text-xs font-bold">₹{billingStatus.lockedMonthlyPrice}</span>
+                                  </div>
+                                )}
                                 <div className="flex justify-between items-center py-2 border-t border-[var(--border)]/50 mt-2.5">
                                   <span className="text-xs text-[var(--text-secondary)]">Auto-renew</span>
                                   <span className="text-xs font-bold">{billingStatus.autoRenew ? 'On' : 'Off'}</span>
@@ -5439,13 +5539,13 @@ export default function Webapp() {
                               <div>
                                 <div className="flex justify-between items-center">
                                   <span className="inline-flex text-[9px] font-extrabold text-white bg-[var(--accent)] px-2 py-0.5 rounded-full uppercase tracking-wider">
-                                    3 Months Free • Most Popular
+                                    {billingStatus && billingStatus.currentOfferPrice <= 149 ? `${billingStatus.spotsRemaining} Spots Left • Most Popular` : 'Most Popular'}
                                   </span>
                                   <span className="w-4 h-4 rounded-full bg-[var(--accent)] flex items-center justify-center text-white text-[9px]">✓</span>
                                 </div>
 
                                 <h4 className="font-serif font-bold text-base text-[var(--text-primary)] mt-3">Early Adopter Pro</h4>
-                                <span className="text-xl font-extrabold mt-1 block">₹149 <span className="text-xs text-[var(--text-secondary)] font-normal">/ month</span></span>
+                                <span className="text-xl font-extrabold mt-1 block">₹{billingStatus?.currentOfferPrice ?? 149} <span className="text-xs text-[var(--text-secondary)] font-normal">/ month</span></span>
                               </div>
 
                               <ul className="mt-4 flex flex-col gap-2 text-xs text-[var(--text-secondary)] font-medium pt-3 border-t border-[var(--border)]/50">
@@ -5535,17 +5635,23 @@ export default function Webapp() {
                             </div>
                           </div>
 
-                          {/* Early Adopter Pro plan card */}
+                          {/* Early Adopter Pro plan card. This screen only
+                              shows a baker who hasn't subscribed yet (still
+                              on TRIAL), so "Locked-in Price" would be
+                              misleading here - nothing is locked in until
+                              they actually subscribe. */}
                           <div className="bg-[var(--surface)] p-5 rounded-2xl border border-[var(--border)] shadow-sm">
                             <div className="flex justify-between items-center">
                               <h4 className="font-serif font-bold text-base flex items-center gap-2">
                                 👑 Early Adopter Pro Plan
                               </h4>
-                              <span className="bg-orange-50 dark:bg-amber-950/20 text-[10px] font-bold text-[var(--accent)] px-2.5 py-0.5 rounded-full border border-orange-100 dark:border-amber-900">Locked-in Price</span>
+                              <span className="bg-orange-50 dark:bg-amber-950/20 text-[10px] font-bold text-[var(--accent)] px-2.5 py-0.5 rounded-full border border-orange-100 dark:border-amber-900">
+                                {billingStatus && billingStatus.currentOfferPrice <= 149 ? `${billingStatus.spotsRemaining} Spots Left` : 'Current Offer'}
+                              </span>
                             </div>
 
                             <span className="text-3xl font-extrabold block mt-3 text-[var(--text-primary)]">
-                              ₹149 <span className="text-xs text-[var(--text-secondary)] font-normal">/ month</span>
+                              ₹{billingStatus?.currentOfferPrice ?? 149} <span className="text-xs text-[var(--text-secondary)] font-normal">/ month</span>
                             </span>
 
                             <ul className="mt-4 flex flex-col gap-2.5 text-xs text-[var(--text-secondary)] font-semibold border-t border-[var(--border)]/50 pt-3.5">
@@ -5633,7 +5739,7 @@ export default function Webapp() {
                               </div>
                               <div className="pb-1">
                                 <h5 className="font-bold text-xs text-[var(--text-primary)] flex items-center justify-between cursor-pointer">
-                                  3. What happens after my 90-day free trial?
+                                  3. What happens after my 30-day free trial?
                                   <ChevronDown size={14} />
                                 </h5>
                               </div>
@@ -5701,7 +5807,7 @@ export default function Webapp() {
                           <div className="flex flex-col gap-2 mb-6">
                             <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">3. Subscription & Cancellation Policy</h4>
                             <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              Kamai offers a 90-day free trial for all new bakers. After the trial, you will be charged ₹149 per month via Razorpay UPI AutoPay. You may cancel your subscription at any time.
+                              Kamai offers a 30-day free trial for all new bakers. After the trial, you will be charged the then-current monthly rate via Razorpay UPI AutoPay — ₹149/month for the first 149 bakers to subscribe, ₹199/month thereafter. Whichever rate applies when your subscription is created is what you continue paying for as long as it stays active; cancelling and re-subscribing later re-applies whatever the current rate is at that time. You may cancel your subscription at any time.
                             </p>
                           </div>
 
