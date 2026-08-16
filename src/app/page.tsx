@@ -5800,7 +5800,7 @@ export default function Webapp() {
 
                             <button
                               type="button"
-                              onClick={() => window.open('https://wa.me/919876543210', '_blank')}
+                              onClick={() => window.open('https://wa.me/919874353532', '_blank')}
                               className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-3.5 rounded-xl shadow-md transition-all active:scale-[0.98] flex items-center justify-center gap-2 mt-4 text-xs cursor-pointer"
                             >
                               <Send size={14} className="rotate-45" /> Open WhatsApp Chat
