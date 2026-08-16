@@ -390,22 +390,23 @@ export default function Webapp() {
   // backend calls (caption text via the existing /notifications/whatsapp
   // endpoint keyed by the order's UUID `id`, then the branded PNG via the
   // new /receipt-image endpoint keyed by the display `orderId`) followed
-  // by a fetch of the resulting signed image URL. navigator.share's file
-  // support is device/browser-dependent — can only be truly verified on a
-  // real phone in real WhatsApp, not in a desktop browser — so this always
-  // has a manual download + wa.me fallback for when it's unavailable.
+  // by a fetch of the resulting signed image URL. Deliberately skips the
+  // OS share sheet (navigator.share) and jumps straight to wa.me with the
+  // customer's own number (whatsappUrl is keyed off order.customer.phone
+  // server-side, see notifications.service.ts) — WhatsApp's deep-link API
+  // only supports prefilled text, not an attached file, so the receipt
+  // image still has to be downloaded and manually attached once the chat
+  // opens; this only removes the app-picker/contact-picker hunting.
   //
-  // navigator.share() must run synchronously inside a live user-gesture —
-  // confirmed live (desktop Chrome) that calling it after the two awaited
-  // network round-trips above throws "Must be handling a user gesture",
-  // because that async work (image generation alone ran ~2.5s) outlasts
-  // the browser's activation window. So this is a two-tap flow: the first
-  // tap fetches everything and stores it in receiptSharePayload; a second,
-  // fresh tap calls navigator.share() with no awaits before it.
+  // window.open() must run synchronously inside a live user-gesture —
+  // same constraint navigator.share() had — so this is a two-tap flow:
+  // the first tap fetches everything and stores it in receiptSharePayload;
+  // a second, fresh tap triggers the download and window.open() with no
+  // awaits before them.
   const [receiptSharing, setReceiptSharing] = useState(false);
   const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
-  const [receiptShareFallback, setReceiptShareFallback] = useState(false);
-  const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; text: string } | null>(null);
+  const [receiptShareSent, setReceiptShareSent] = useState(false);
+  const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; whatsappUrl: string } | null>(null);
 
   const openCustomerProfile = useCallback((customerId: string) => {
     setSelectedOrderDetail(null);
@@ -425,7 +426,7 @@ export default function Webapp() {
     setSelectedCustomerProfile(null);
     setOrderDetailError(null);
     setReceiptShareError(null);
-    setReceiptShareFallback(false);
+    setReceiptShareSent(false);
     setReceiptSharePayload(null);
     setActiveSheet('customer-profile');
     setOrderDetailLoading(true);
@@ -489,7 +490,7 @@ export default function Webapp() {
   const prepareReceiptShare = useCallback(async (order: { id: string; orderId: string }) => {
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setReceiptShareError(null);
-    setReceiptShareFallback(false);
+    setReceiptShareSent(false);
     setReceiptSharePayload(null);
     setReceiptSharing(true);
     try {
@@ -497,7 +498,6 @@ export default function Webapp() {
         '/api/notifications/whatsapp',
         { orderId: order.id, template: 'RECEIPT' }
       );
-      const text = new URL(notifRes.data.whatsappUrl).searchParams.get('text') || '';
 
       const imageRes = await api.post<{ success: boolean; data: { imageUrl: string } }>(
         `/api/orders/${order.orderId}/receipt-image`,
@@ -509,24 +509,11 @@ export default function Webapp() {
       const blob = await imgRes.blob();
       const file = new File([blob], `receipt-${order.orderId}.png`, { type: 'image/png' });
 
-      if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
-        // Can't call navigator.share() here — see the comment on
-        // receiptSharePayload above. Stash the prepared file/text; the
-        // "Tap to Send via WhatsApp" button's own click handler calls
-        // navigator.share() synchronously with no awaits before it.
-        setReceiptSharePayload({ file, text });
-      } else {
-        const downloadUrl = URL.createObjectURL(file);
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(downloadUrl);
-        window.open(notifRes.data.whatsappUrl, '_blank');
-        setReceiptShareFallback(true);
-      }
+      // Can't trigger the download / window.open() here — see the comment
+      // on receiptSharePayload above. Stash the prepared file/link; the
+      // "Tap to Send via WhatsApp" button's own click handler fires both
+      // synchronously with no awaits before it.
+      setReceiptSharePayload({ file, whatsappUrl: notifRes.data.whatsappUrl });
     } catch (err: any) {
       if (err?.errorCode === 'WHATSAPP_RECEIPT_DISABLED') {
         setReceiptShareError('WhatsApp receipts are turned off for your account.');
@@ -543,18 +530,18 @@ export default function Webapp() {
 
   const confirmReceiptShare = useCallback(() => {
     if (!receiptSharePayload) return;
-    const { file, text } = receiptSharePayload;
-    navigator
-      .share({ files: [file], text })
-      .then(() => setReceiptSharePayload(null))
-      .catch((err: any) => {
-        // The user dismissing the native share sheet themselves throws
-        // AbortError — not a real failure. Keep the prepared payload so
-        // they can just tap "Tap to Send" again without re-fetching.
-        if (err?.name !== 'AbortError') {
-          setReceiptShareError(err.message || 'Could not share the receipt. Please try again.');
-        }
-      });
+    const { file, whatsappUrl } = receiptSharePayload;
+    const downloadUrl = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(downloadUrl);
+    window.open(whatsappUrl, '_blank');
+    setReceiptShareSent(true);
+    setReceiptSharePayload(null);
   }, [receiptSharePayload]);
 
   // Payment-reminder quick action (POST /api/notifications/whatsapp,
@@ -4943,7 +4930,7 @@ export default function Webapp() {
                               setActiveSheet('none');
                               setSelectedOrderDetail(null);
                               setReceiptShareError(null);
-                              setReceiptShareFallback(false);
+                              setReceiptShareSent(false);
                               setReceiptSharePayload(null);
                             }}
                             className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
@@ -5111,9 +5098,9 @@ export default function Webapp() {
                                     )}
                                   </button>
                                 )}
-                                {receiptShareFallback && (
+                                {receiptShareSent && (
                                   <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200/50 text-blue-700 dark:text-blue-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
-                                    <Download size={12} /> Image downloaded — attach it in WhatsApp to send.
+                                    <Download size={12} /> Image downloaded — attach it in the WhatsApp chat that just opened.
                                   </div>
                                 )}
                                 {receiptShareError && (
