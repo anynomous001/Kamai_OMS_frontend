@@ -22,6 +22,7 @@ import {
   haversineDistanceKm,
 } from '@/lib/marketplace/client';
 import { useAddToCart } from '@/lib/marketplace/useAddToCart';
+import { MarketplaceComingSoon } from '@/components/marketplace/MarketplaceComingSoon';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -3596,8 +3597,14 @@ export default function Webapp() {
                 </div>
               )}
 
-              {/* TAB 5: SUPPLY HUB — Screen 1: Browse Suppliers */}
+              {/* TAB 5: SUPPLY HUB — Screen 1: Browse Suppliers.
+                  Gated behind NEXT_PUBLIC_FEATURE_MARKETPLACE - any value
+                  other than the exact string "true" (including unset)
+                  renders the Coming Soon placeholder instead. The nav tab
+                  itself always stays visible/tappable either way; only
+                  this content branch changes. */}
               {activeTab === 'supply' && (
+                process.env.NEXT_PUBLIC_FEATURE_MARKETPLACE === 'true' ? (
                 <div className="w-full animate-fadeIn">
 
                   {/* Header Title */}
@@ -3726,6 +3733,9 @@ export default function Webapp() {
                   </div>
 
                 </div>
+                ) : (
+                  <MarketplaceComingSoon />
+                )
               )}
 
               {/* TAB 6: SETTINGS (MORE) - Desktop layouts render these settings cards directly */}
