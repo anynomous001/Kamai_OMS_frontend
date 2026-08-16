@@ -3998,8 +3998,17 @@ export default function Webapp() {
                     </div>
                   </div>
 
-                  {/* Grid Split: Form on left, recent logs on right */}
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+                  {/* Grid Split: Form on left, recent logs on right.
+                      Deliberately grid-cols-1 at every width, not just
+                      lg:grid-cols-3 stripped to grid-cols-1 — the app shell
+                      (see the outer max-w-[480px] wrapper) caps rendered
+                      width at 480px regardless of the actual device/browser
+                      viewport, so a `lg:` breakpoint (1024px) still fires
+                      on a wide screen even though the visible content stays
+                      480px wide, squeezing a 3-column layout into a
+                      phone-width card. Matches the single-column layout
+                      that was already correct on narrow viewports. */}
+                  <div className="grid grid-cols-1 gap-6 items-start">
 
                     {/* Log form (Left Column) — real fields: quantity x
                         pricePerUnit (server computes totalCost), not a flat
@@ -4128,14 +4137,16 @@ export default function Webapp() {
                         </div>
                       )}
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Same fixed-shell-width reasoning as the grid
+                          above — always single column, not sm:grid-cols-2. */}
+                      <div className="grid grid-cols-1 gap-4">
                         {investmentsLoading &&
                           [0, 1, 2, 3].map((i) => (
                             <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
                           ))}
 
                         {!investmentsLoading && !investmentsError && investmentsList.length === 0 && (
-                          <p className="text-xs text-[var(--text-secondary)] text-center py-8 sm:col-span-2">No expenses logged yet.</p>
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-8">No expenses logged yet.</p>
                         )}
 
                         {!investmentsLoading &&
