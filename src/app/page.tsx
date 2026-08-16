@@ -435,7 +435,58 @@ export default function Webapp() {
       .finally(() => setOrderDetailLoading(false));
   }, []);
 
+  // Real baker profile (GET /api/baker/profile) — backs Settings tab,
+  // Edit Profile & Legal, Manage UPI, and pre-fills the UPI form.
+  const [bakerProfile, setBakerProfile] = useState<RealBakerProfile | null>(null);
+  const [bakerProfileLoading, setBakerProfileLoading] = useState(false);
+  const [bakerProfileError, setBakerProfileError] = useState<string | null>(null);
+
+  // Read-only paywall gate: true once trialEndsOn has passed and there's no
+  // ACTIVE subscription (covers TRIAL/PENDING/PAUSED/CANCELLED/EXPIRED
+  // alike, not just a literal TRIAL status — cancelling after the trial
+  // ended still means no paid access). Reads stay allowed everywhere;
+  // write handlers check this and call showReadOnlyBlockedMessage()
+  // instead of mutating (mirrored server-side in requireWriteAccess, which
+  // is what actually enforces this). Declared here, above every handler
+  // that reads it in a useCallback dependency array (dependency arrays are
+  // evaluated immediately during render, unlike a handler's own body,
+  // which only runs later on invocation - so this can't sit below the
+  // handlers that close over it as a dependency the way plain event
+  // handlers can). Recomputed from bakerProfile.subscription each render,
+  // which is refetched on entering the dashboard and again right after a
+  // subscribe attempt, so it clears on its own once the webhook flips the
+  // baker to ACTIVE. Uses the server-computed trialDaysRemaining rather
+  // than comparing trialEndsOn against a client-side "now": trialEndsAt is
+  // a fixed past timestamp once set, so trialDaysRemaining reaching 0 is
+  // just as reliable a signal, without calling an impure Date.now() during
+  // render.
+  const isPaywalled =
+    bakerProfile != null &&
+    bakerProfile.subscription.status !== 'ACTIVE' &&
+    bakerProfile.subscription.trialDaysRemaining <= 0;
+
+  // Read-only paywall (trial-expired, unsubscribed): the banner is
+  // dismissible for this session only — plain component state, not
+  // persisted, so it naturally reappears on next reload/visit since
+  // nothing else about the underlying condition changed. The toast is
+  // shown any time a blocked write is attempted from anywhere in the
+  // app; real enforcement is server-side (every blocked endpoint 402s),
+  // this is purely the "why didn't that work" explanation.
+  const [readOnlyBannerDismissed, setReadOnlyBannerDismissed] = useState(false);
+  const [readOnlyToastVisible, setReadOnlyToastVisible] = useState(false);
+
+  // Call at the top of every write handler once isPaywalled is true,
+  // before attempting the mutation. The real block is server-side (every
+  // gated endpoint 402s regardless of this), but skipping the network
+  // round-trip here means an unpaid baker gets the clear "trial ended"
+  // explanation immediately instead of a generic request-failed error.
+  const showReadOnlyBlockedMessage = () => {
+    setReadOnlyToastVisible(true);
+    window.setTimeout(() => setReadOnlyToastVisible(false), 6000);
+  };
+
   const prepareReceiptShare = useCallback(async (order: { id: string; orderId: string }) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setReceiptShareError(null);
     setReceiptShareFallback(false);
     setReceiptSharePayload(null);
@@ -484,7 +535,10 @@ export default function Webapp() {
     } finally {
       setReceiptSharing(false);
     }
-  }, []);
+    // isPaywalled deliberately included: without it this callback would
+    // freeze the read-only check at whatever isPaywalled was on first
+    // render (useCallback keeps the closure until a dep changes).
+  }, [isPaywalled]);
 
   const confirmReceiptShare = useCallback(() => {
     if (!receiptSharePayload) return;
@@ -631,7 +685,7 @@ export default function Webapp() {
     id: string;
     orderId: string;
     status: RealOrderStatus;
-    customer: { name: string; phone: string | null; address: string | null };
+    customer: { name: string; phone: string | null; address: string | null } | null;
     cake: { category: string; flavour: string; weightInPounds: number | null; quantity: number | null };
     occasion: string | null;
     customInstructions: string | null;
@@ -659,9 +713,9 @@ export default function Webapp() {
     const weightStr = weight !== null && weight !== undefined ? String(weight) : '';
     const matchesPreset = (WEIGHT_PRESETS_LB as readonly string[]).includes(weightStr);
     setEditOrderForm({
-      customerName: d.customer.name || '',
-      phone: d.customer.phone || '',
-      address: d.customer.address || '',
+      customerName: d.customer?.name || '',
+      phone: d.customer?.phone || '',
+      address: d.customer?.address || '',
       cakeCategory: d.cake.category || CAKE_CATEGORIES[0],
       flavour: d.cake.flavour || CAKE_FLAVOURS[0],
       weightPreset: matchesPreset ? (weightStr as (typeof WEIGHT_PRESETS_LB)[number]) : 'custom',
@@ -689,6 +743,7 @@ export default function Webapp() {
 
   const handleUpdateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setEditOrderError(null);
 
     if (!editOrderNumber) return;
@@ -846,12 +901,6 @@ export default function Webapp() {
   const [menuSlugInput, setMenuSlugInput] = useState('');
   const [menuSlugSubmitting, setMenuSlugSubmitting] = useState(false);
   const [menuSlugError, setMenuSlugError] = useState<string | null>(null);
-
-  // Real baker profile (GET /api/baker/profile) — backs Settings tab,
-  // Edit Profile & Legal, Manage UPI, and pre-fills the UPI form.
-  const [bakerProfile, setBakerProfile] = useState<RealBakerProfile | null>(null);
-  const [bakerProfileLoading, setBakerProfileLoading] = useState(false);
-  const [bakerProfileError, setBakerProfileError] = useState<string | null>(null);
 
   // Real UPI settings form (PUT /api/baker/upi-settings) — the only
   // profile field that actually has a write endpoint.
@@ -1429,6 +1478,7 @@ export default function Webapp() {
   };
 
   const submitRecordPayment = async (amountReceived: number) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     if (!recordPaymentOrderNumber || !recordPaymentDetail) return;
     setRecordPaymentError(null);
 
@@ -1477,6 +1527,7 @@ export default function Webapp() {
   // through unchanged from the freshly-fetched order (same pattern as
   // handleUpdateOrder), touching only payment.advancePaid.
   const handleDirectEditPayment = async () => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     if (!recordPaymentOrderNumber || !recordPaymentDetail) return;
     setRecordPaymentError(null);
 
@@ -1495,7 +1546,7 @@ export default function Webapp() {
     setRecordPaymentSubmitting(true);
     try {
       await api.put(`/api/orders/${recordPaymentOrderNumber}`, {
-        customer: { name: d.customer.name, phone: d.customer.phone, address: d.customer.address ?? undefined },
+        customer: { name: d.customer?.name, phone: d.customer?.phone, address: d.customer?.address ?? undefined },
         cake: {
           category: d.cake.category,
           flavour: d.cake.flavour,
@@ -1742,6 +1793,7 @@ export default function Webapp() {
   // (the backend verifies the object exists when photoPath is submitted),
   // unlike BUSINESS_LOGO which writes straight onto the Baker row.
   const handleMenuItemPhotoUpload = async (file: File) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setMenuItemPhotoUploading(true);
     setMenuItemPhotoUploadError(null);
     try {
@@ -1769,6 +1821,7 @@ export default function Webapp() {
 
   const handleSaveMenuItem = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setMenuItemFormError(null);
 
     // Client-side validation mirrors the backend's rules exactly (see
@@ -1823,6 +1876,7 @@ export default function Webapp() {
   };
 
   const handleDeleteMenuItem = async (item: RealMenuItem) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     if (!window.confirm(`Delete "${item.name}" from your menu? This can't be undone.`)) return;
     setMenuItemDeletingId(item.id);
     setMenuItemsError(null);
@@ -1837,6 +1891,7 @@ export default function Webapp() {
   };
 
   const handleToggleMenuItemAvailability = async (item: RealMenuItem) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     const nextAvailable = !item.isAvailable;
     setMenuItemsList((list) => list.map((i) => (i.id === item.id ? { ...i, isAvailable: nextAvailable } : i)));
     try {
@@ -1848,6 +1903,7 @@ export default function Webapp() {
   };
 
   const handleMoveMenuItem = async (index: number, direction: -1 | 1) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     const newIndex = index + direction;
     if (newIndex < 0 || newIndex >= menuItemsList.length) return;
 
@@ -1874,6 +1930,7 @@ export default function Webapp() {
   };
 
   const handleSaveMenuSlug = async () => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     const slug = menuSlugInput.trim();
     if (!slug) {
       setMenuSlugError('Enter a menu link.');
@@ -1932,6 +1989,7 @@ export default function Webapp() {
 
   const handleSaveUpiSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setUpiSubmitting(true);
     setUpiError(null);
     setUpiSuccess(false);
@@ -1948,6 +2006,7 @@ export default function Webapp() {
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setEditProfileSubmitting(true);
     setEditProfileError(null);
     setEditProfileSuccess(false);
@@ -1988,6 +2047,7 @@ export default function Webapp() {
   // Supabase's signed-upload URL embeds its own auth token, no additional
   // headers/keys needed), then confirms so the backend persists logoPath.
   const handleProfilePictureUpload = async (file: File) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setLogoUploading(true);
     setLogoUploadError(null);
     try {
@@ -2145,6 +2205,7 @@ export default function Webapp() {
 
   const handleLogExpense = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     if (!expenseForm.materialName || !expenseForm.quantity || !expenseForm.unit || !expenseForm.pricePerUnit) return;
 
     setLogExpenseSubmitting(true);
@@ -2179,9 +2240,13 @@ export default function Webapp() {
 
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setNewOrderError(null);
 
-    if (!newOrderForm.customerName.trim()) {
+    // Name is required unless the order is a fully anonymous walk-in sale
+    // (both name and phone left blank) - matches createOrderJsonSchema's
+    // if/then on the backend, which is the actual enforcement.
+    if (!newOrderForm.customerName.trim() && newOrderForm.phone.trim()) {
       setNewOrderError('Customer name is required.');
       return;
     }
@@ -2218,7 +2283,10 @@ export default function Webapp() {
         '/api/orders',
         {
           customer: {
-            name: newOrderForm.customerName.trim(),
+            // Omitted (not '') when blank - an empty string would fail the
+            // backend's minLength check even for a legitimately anonymous
+            // (name+phone both blank) walk-in sale.
+            name: newOrderForm.customerName.trim() || undefined,
             phone: newOrderForm.phone.trim() || null,
             address: newOrderForm.address.trim() || undefined,
           },
@@ -2397,24 +2465,6 @@ export default function Webapp() {
   const handlePrevMonth = () => shiftCalendarMonth(-1);
   const handleNextMonth = () => shiftCalendarMonth(1);
 
-  // Full-screen, unbypassable trial-expired paywall: blocks the entire app
-  // shell whenever trialEndsOn has passed and there's no ACTIVE
-  // subscription (covers TRIAL/PENDING/PAUSED/CANCELLED/EXPIRED alike, not
-  // just a literal TRIAL status — cancelling after the trial ended still
-  // means no paid access). No grace period, no partial access, no
-  // dismissal - it re-evaluates from bakerProfile.subscription, which is
-  // refetched on entering the dashboard and again right after a
-  // subscribe attempt, so it clears on its own once the webhook flips the
-  // baker to ACTIVE.
-  //
-  // Uses the server-computed trialDaysRemaining rather than comparing
-  // trialEndsOn against a client-side "now": trialEndsAt is a fixed past
-  // timestamp once set, so trialDaysRemaining reaching 0 is just as
-  // reliable a signal, without calling an impure Date.now() during render.
-  const isPaywalled =
-    bakerProfile != null &&
-    bakerProfile.subscription.status !== 'ACTIVE' &&
-    bakerProfile.subscription.trialDaysRemaining <= 0;
 
   useEffect(() => {
     if (isPaywalled && billingStatus === null && !billingLoading) {
@@ -2572,43 +2622,72 @@ export default function Webapp() {
         {step === 'dashboard' && (
           <div className="flex-1 flex flex-col h-full relative overflow-hidden">
 
-            {/* TRIAL-EXPIRED PAYWALL — full-screen, unbypassable block.
-                Sits above sheets (z-50) and the confirm-dialog modal
-                (z-60): no close button, no backdrop-click dismiss, no way
-                to reach any tab/sheet underneath while it's up. See
-                isPaywalled above for the exact gating condition. */}
-            {isPaywalled && (
-              <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-0 md:p-6">
-                <div className="bg-[var(--surface)] w-full max-w-[480px] mx-auto h-full md:h-auto md:max-h-[90%] overflow-y-auto no-scrollbar border border-[var(--border)] shadow-2xl p-8 flex flex-col items-center text-center md:rounded-[32px]">
-                  <span className="text-5xl mb-4">⏰</span>
-                  <h3 className="font-serif text-2xl font-bold text-[var(--text-primary)]">Your free trial has ended</h3>
-                  <p className="text-sm text-[var(--text-secondary)] mt-3 leading-relaxed max-w-sm">
-                    Set up Razorpay UPI AutoPay to keep using your Kamai cockpit — orders, WhatsApp receipts, and margin tracking are paused until you subscribe.
-                  </p>
+            {/* READ-ONLY BANNER — trial-expired, unsubscribed bakers can
+                still navigate and view everything (orders, customers,
+                payment history, analytics, their own profile); only
+                writes are blocked, enforced server-side (every mutating
+                endpoint 402s for this state regardless of what the UI
+                shows). Not a hard block: no overlay, no dismiss-proof
+                positioning, the rest of the app underneath is fully
+                usable. Dismissible for this session only — plain
+                component state, so it reappears on next reload/visit,
+                not gone forever from one click. See isPaywalled above
+                for the exact gating condition. */}
+            {isPaywalled && !readOnlyBannerDismissed && (
+              <div className="w-full bg-[var(--accent)] text-white px-4 py-2.5 flex items-center gap-2.5 text-[11px] font-medium">
+                <AlertCircle size={14} className="flex-shrink-0" />
+                <span className="flex-1 leading-snug">Your free trial has ended — you can view everything, but changes are paused until you subscribe.</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveSheet('help-support')}
+                  className="underline font-semibold whitespace-nowrap cursor-pointer flex-shrink-0"
+                >
+                  Support
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmSubscription}
+                  disabled={subscriptionSubmitting}
+                  className="bg-white text-[var(--accent)] px-3 py-1 rounded-full font-bold whitespace-nowrap cursor-pointer disabled:opacity-60 flex-shrink-0"
+                >
+                  {subscriptionSubmitting ? '...' : 'Subscribe'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReadOnlyBannerDismissed(true)}
+                  aria-label="Dismiss"
+                  className="flex-shrink-0 cursor-pointer opacity-80 hover:opacity-100"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
 
-                  <div className="w-full bg-[var(--background)] border border-[var(--border)] rounded-2xl p-5 mt-6">
-                    <span className="text-3xl font-extrabold block text-[var(--text-primary)]">
-                      ₹{billingStatus?.currentOfferPrice ?? 149} <span className="text-xs text-[var(--text-secondary)] font-normal">/ month</span>
-                    </span>
-                    {billingStatus && billingStatus.currentOfferPrice <= 149 && (
-                      <span className="inline-flex text-[10px] font-bold text-[var(--accent)] mt-2">{billingStatus.spotsRemaining} early-adopter spots left</span>
-                    )}
-                  </div>
-
-                  {subscriptionError && (
-                    <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium flex items-center gap-2 mt-4 w-full">
-                      <AlertCircle size={13} /> {subscriptionError}
-                    </div>
-                  )}
-
+            {/* Blocked-write toast — shown briefly whenever a write
+                handler bails out early because isPaywalled is true (see
+                showReadOnlyBlockedMessage). Server-side enforcement is
+                what actually matters; this is just the explanation. */}
+            {readOnlyToastVisible && (
+              <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[110] w-[calc(100%-2rem)] max-w-[440px] bg-[var(--text-primary)] text-[var(--background)] rounded-2xl shadow-2xl px-4 py-3.5 flex items-center gap-3">
+                <span className="text-xl flex-shrink-0">⏰</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[11.5px] font-medium leading-snug">Your free trial has ended — subscribe to make changes again.</p>
                   <button
-                    onClick={handleConfirmSubscription}
-                    disabled={subscriptionSubmitting}
-                    className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-6 cursor-pointer"
+                    type="button"
+                    onClick={() => { setReadOnlyToastVisible(false); setActiveSheet('subscription-autopay'); fetchBillingStatus(); }}
+                    className="text-[11px] font-bold underline mt-1 cursor-pointer"
                   >
-                    {subscriptionSubmitting ? 'Starting...' : '🔒 Set Up UPI AutoPay & Continue'}
+                    View Billing
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setReadOnlyToastVisible(false)}
+                  aria-label="Dismiss"
+                  className="flex-shrink-0 cursor-pointer opacity-70 hover:opacity-100"
+                >
+                  <X size={16} />
+                </button>
               </div>
             )}
 
@@ -2920,7 +2999,7 @@ export default function Webapp() {
                                   🎂
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName} — {o.cakeCategory}</h4>
+                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName || 'Walk-in customer'} — {o.cakeCategory}</h4>
                                   <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
                                     {new Date(`${o.deliveryDate}T00:00:00`).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
                                     {o.deliveryTime ? ` • ${o.deliveryTime}` : ''} • <span className="text-[var(--accent)] font-semibold">{o.status}</span>
@@ -3058,7 +3137,7 @@ export default function Webapp() {
                                   </div>
                                 </div>
 
-                                <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.customerName}</h3>
+                                <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.customerName || 'Walk-in customer'}</h3>
                                 <p className="text-xs text-[var(--text-secondary)]">{o.phone || 'No phone on file'}</p>
                               </div>
 
@@ -3211,7 +3290,7 @@ export default function Webapp() {
                     {!customersLoading &&
                       customersList.map((c) => {
                         const colors = ['bg-amber-100 dark:bg-amber-950/30 text-amber-800 dark:text-amber-400 border-amber-200 dark:border-amber-900', 'bg-orange-100 dark:bg-orange-950/30 text-orange-800 dark:text-orange-400 border-orange-200 dark:border-orange-900', 'bg-orange-100 dark:bg-orange-950/30 text-orange-800 dark:text-orange-400 border-orange-200 dark:border-orange-900', 'bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-300 border-neutral-200 dark:border-neutral-700'];
-                        const initial = c.name.charAt(0);
+                        const initial = (c.name || '?').charAt(0);
                         return (
                           <div
                             key={c.customerId}
@@ -3493,7 +3572,7 @@ export default function Webapp() {
                                     <div className="flex items-center gap-4">
                                       <span className="text-xs font-bold text-[var(--accent)]">{o.orderNumber}</span>
                                       <div>
-                                        <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName}</h4>
+                                        <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName || 'Walk-in customer'}</h4>
                                         <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{o.status} • ₹{o.totalPrice.toLocaleString('en-IN')}</p>
                                       </div>
                                     </div>
@@ -4344,7 +4423,6 @@ export default function Webapp() {
                                 value={newOrderForm.customerName}
                                 onChange={(e) => setNewOrderForm({ ...newOrderForm, customerName: e.target.value })}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
-                                required
                               />
                               <input
                                 type="tel"
@@ -4354,6 +4432,11 @@ export default function Webapp() {
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
                               />
                             </div>
+                            {!newOrderForm.customerName.trim() && !newOrderForm.phone.trim() && (
+                              <p className="text-[11px] text-[var(--text-secondary)] mb-3 -mt-2">
+                                No name or phone — this will be logged as a walk-in sale.
+                              </p>
+                            )}
                             <input
                               type="text"
                               placeholder="Delivery Address (optional)"
@@ -4907,31 +4990,37 @@ export default function Webapp() {
 
                             <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
                               <h5 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">Customer</h5>
-                              <p className="text-sm font-bold">{selectedOrderDetail.customer.name}</p>
-                              <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.phone || 'No phone on file'}</p>
-                              {selectedOrderDetail.customer.address && (
-                                <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.address}</p>
+                              {selectedOrderDetail.customer ? (
+                                <>
+                                  <p className="text-sm font-bold">{selectedOrderDetail.customer.name}</p>
+                                  <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.phone || 'No phone on file'}</p>
+                                  {selectedOrderDetail.customer.address && (
+                                    <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.address}</p>
+                                  )}
+                                  <div className="grid grid-cols-2 gap-3 mt-3">
+                                    {selectedOrderDetail.customer.phone && (
+                                      <a
+                                        href={`https://wa.me/${selectedOrderDetail.customer.phone.replace(/\D/g, '')}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                      >
+                                        <MessageSquare size={14} className="text-emerald-600" /> Message
+                                      </a>
+                                    )}
+                                    {selectedOrderDetail.customer.phone && (
+                                      <a
+                                        href={`tel:${selectedOrderDetail.customer.phone}`}
+                                        className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                      >
+                                        <Phone size={14} className="text-blue-600" /> Call
+                                      </a>
+                                    )}
+                                  </div>
+                                </>
+                              ) : (
+                                <p className="text-sm font-bold text-[var(--text-secondary)]">Walk-in customer — no name or phone on file</p>
                               )}
-                              <div className="grid grid-cols-2 gap-3 mt-3">
-                                {selectedOrderDetail.customer.phone && (
-                                  <a
-                                    href={`https://wa.me/${selectedOrderDetail.customer.phone.replace(/\D/g, '')}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
-                                  >
-                                    <MessageSquare size={14} className="text-emerald-600" /> Message
-                                  </a>
-                                )}
-                                {selectedOrderDetail.customer.phone && (
-                                  <a
-                                    href={`tel:${selectedOrderDetail.customer.phone}`}
-                                    className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
-                                  >
-                                    <Phone size={14} className="text-blue-600" /> Call
-                                  </a>
-                                )}
-                              </div>
                             </div>
 
                             <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
@@ -5058,7 +5147,7 @@ export default function Webapp() {
                             {/* Header Overview Card */}
                             <div className="bg-[var(--background)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm text-center mb-4 flex flex-col items-center">
                               <div className="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-950/30 text-amber-800 dark:text-amber-400 border border-amber-200 dark:border-amber-900 flex items-center justify-center font-bold text-2xl mb-3 shadow-inner">
-                                {selectedCustomerProfile.name.charAt(0)}
+                                {(selectedCustomerProfile.name || 'Walk-in customer').charAt(0)}
                               </div>
                               <h4 className="font-serif font-bold text-xl flex items-center gap-1.5">
                                 {selectedCustomerProfile.name}
@@ -5141,7 +5230,7 @@ export default function Webapp() {
                               }}
                               className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
                             >
-                              <Plus size={16} /> New Order for {selectedCustomerProfile.name.split(' ')[0]}
+                              <Plus size={16} /> New Order for {(selectedCustomerProfile.name || 'Walk-in customer').split(' ')[0]}
                             </button>
                           </>
                         )}
@@ -7221,7 +7310,7 @@ export default function Webapp() {
                         {/* Read-only context — total/paid/balance/status */}
                         <div className="bg-[var(--background)] p-4 rounded-2xl border border-[var(--border)] mb-5">
                           <p className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">
-                            {recordPaymentOrderNumber} • {recordPaymentDetail.customer.name}
+                            {recordPaymentOrderNumber} • {recordPaymentDetail.customer?.name || 'Walk-in customer'}
                           </p>
                           <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Total</span><span className="font-bold">₹{recordPaymentDetail.payment.totalPrice.toLocaleString('en-IN')}</span></div>
                           <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Paid So Far</span><span className="font-bold">₹{recordPaymentDetail.payment.advancePaid.toLocaleString('en-IN')}</span></div>
