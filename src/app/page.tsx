@@ -358,7 +358,7 @@ export default function Webapp() {
   const [activeSheet, setActiveSheet] = useState<
     'none' | 'new-order' | 'edit-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
-    'subscription-status' | 'help-support' | 'legal-policies' |
+    'subscription-status' | 'help-support' |
     'my-menu' | 'add-edit-menu-item' | 'share-menu' | 'supply-catalogue' | 'supply-cart' | 'supply-orders'
   >('none');
 
@@ -2538,7 +2538,7 @@ export default function Webapp() {
 
                   <p className="text-center text-[11px] leading-relaxed text-[var(--text-secondary)] px-4 max-w-[280px]">
                     By continuing, you agree to Kamai&apos;s<br />
-                    <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Terms of Service</span> and <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Privacy Policy</span>.
+                    <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Privacy Policy</a>.
                   </p>
                 </div>
               </div>
@@ -3940,16 +3940,31 @@ export default function Webapp() {
                           <ChevronRight size={14} className="text-[var(--text-secondary)]" />
                         </div>
 
-                        <div
-                          onClick={() => setActiveSheet('legal-policies')}
+                        <a
+                          href="/terms"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center justify-between py-2.5 border-b border-[var(--border)]/50 cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <FileText size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Terms of Service</span>
+                          </div>
+                          <ChevronRight size={14} className="text-[var(--text-secondary)]" />
+                        </a>
+
+                        <a
+                          href="/privacy"
+                          target="_blank"
+                          rel="noopener noreferrer"
                           className="flex items-center justify-between py-2.5 cursor-pointer group"
                         >
                           <div className="flex items-center gap-2">
                             <Shield size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
-                            <span className="text-xs font-medium text-[var(--text-primary)]">Privacy Policy & Terms</span>
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Privacy Policy</span>
                           </div>
                           <ChevronRight size={14} className="text-[var(--text-secondary)]" />
-                        </div>
+                        </a>
                       </div>
                     </div>
 
@@ -5702,6 +5717,11 @@ export default function Webapp() {
                             <AlertCircle size={13} /> {subscriptionError}
                           </div>
                         )}
+                        <p className="text-center text-[10.5px] leading-relaxed text-[var(--text-secondary)] px-2 mb-3">
+                          By subscribing, you agree to our{' '}
+                          <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Terms of Service</a> and{' '}
+                          <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Privacy Policy</a>.
+                        </p>
                         <button
                           onClick={handleConfirmSubscription}
                           disabled={subscriptionSubmitting}
@@ -5864,60 +5884,6 @@ export default function Webapp() {
                           </div>
 
                         </div>
-                      </div>
-                    )}
-
-                    {/* SHEET: LEGAL & POLICIES */}
-                    {activeSheet === 'legal-policies' && (
-                      <div className="flex-1 flex flex-col">
-                        <div className="flex justify-between items-center mb-6">
-                          <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
-                          <h3 className="font-serif text-xl md:text-2xl font-bold">Legal & Policies</h3>
-                          <div className="w-6"></div>
-                        </div>
-
-                        <div className="flex flex-col gap-6 pb-6 overflow-y-auto">
-
-                          <div className="bg-orange-50/50 dark:bg-[#1A0C06] p-4 rounded-2xl border border-orange-100/50 flex items-center gap-3">
-                            <span className="text-2xl">🛡️</span>
-                            <div>
-                              <h4 className="font-bold text-xs text-[var(--text-primary)]">Last updated: October 2026</h4>
-                              <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Review Kamai&apos;s merchant terms, data protection standards, and refund policies.</p>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-col gap-2">
-                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">1. Merchant Terms of Service</h4>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              By accessing or using Kamai (the &quot;Platform&quot;), you agree to be bound by these Terms of Service. Kamai is an Order Management System built for independent home bakers to manage orders, customers, invoices, payments, and business insights.
-                            </p>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              You are responsible for maintaining the accuracy of your business information, fulfilling orders on time, and complying with all applicable laws and food safety regulations in India.
-                            </p>
-                          </div>
-
-                          <div className="flex flex-col gap-2">
-                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">2. Data Protection & Privacy Policy</h4>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              We take your privacy seriously. Kamai securely stores your data on Supabase, a globally trusted and secure database infrastructure. We collect and store only the data necessary to operate the Platform, including customer phone numbers, order details, payment history, and business metrics.
-                            </p>
-                          </div>
-
-                          <div className="flex flex-col gap-2 mb-6">
-                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">3. Subscription & Cancellation Policy</h4>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              Kamai offers a 30-day free trial for all new bakers. After the trial, you will be charged the then-current monthly rate via Razorpay UPI AutoPay — ₹149/month for the first 149 bakers to subscribe, ₹199/month thereafter. Whichever rate applies when your subscription is created is what you continue paying for as long as it stays active; cancelling and re-subscribing later re-applies whatever the current rate is at that time. You may cancel your subscription at any time.
-                            </p>
-                          </div>
-
-                        </div>
-
-                        <button
-                          type="button"
-                          className="w-full bg-[var(--surface)] text-[var(--accent)] border border-[var(--accent)]/50 hover:bg-orange-50 dark:hover:bg-orange-950/20 font-semibold py-4 rounded-2xl transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
-                        >
-                          📄 Download Terms as PDF
-                        </button>
                       </div>
                     )}
 
