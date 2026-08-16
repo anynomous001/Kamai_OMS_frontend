@@ -407,6 +407,27 @@ export default function Webapp() {
   const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
   const [receiptShareSent, setReceiptShareSent] = useState(false);
   const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; whatsappUrl: string } | null>(null);
+  // A fast double-tap on either button fires two click events before React
+  // re-renders to disable/hide it — state alone doesn't close that window
+  // since setState is batched/async, so both taps would still see the old
+  // (non-null / not-yet-loading) values and run twice, e.g. downloading the
+  // receipt image twice and opening WhatsApp twice. Refs mutate
+  // synchronously, so checking-and-setting one at the top of each handler
+  // closes the window a state check can't.
+  //
+  // receiptShareInFlightRef guards prepareReceiptShare, which is async, so
+  // resetting it once that call settles (success or error) is correct and
+  // lets the next legitimate prepare through.
+  //
+  // confirmReceiptShare has no awaits at all — its whole body, including
+  // any reset of a flag, would finish before a second synchronous click
+  // even starts, so a reset-at-the-end guard can never actually block
+  // anything. receiptShareConfirmedRef is deliberately never reset inside
+  // confirmReceiptShare itself; it's only cleared when a fresh payload is
+  // prepared, so it stays locked for the rest of this payload's lifetime
+  // once consumed.
+  const receiptShareInFlightRef = useRef(false);
+  const receiptShareConfirmedRef = useRef(false);
 
   const openCustomerProfile = useCallback((customerId: string) => {
     setSelectedOrderDetail(null);
@@ -489,6 +510,8 @@ export default function Webapp() {
 
   const prepareReceiptShare = useCallback(async (order: { id: string; orderId: string }) => {
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    if (receiptShareInFlightRef.current) return;
+    receiptShareInFlightRef.current = true;
     setReceiptShareError(null);
     setReceiptShareSent(false);
     setReceiptSharePayload(null);
@@ -513,6 +536,7 @@ export default function Webapp() {
       // on receiptSharePayload above. Stash the prepared file/link; the
       // "Tap to Send via WhatsApp" button's own click handler fires both
       // synchronously with no awaits before it.
+      receiptShareConfirmedRef.current = false;
       setReceiptSharePayload({ file, whatsappUrl: notifRes.data.whatsappUrl });
     } catch (err: any) {
       if (err?.errorCode === 'WHATSAPP_RECEIPT_DISABLED') {
@@ -522,6 +546,7 @@ export default function Webapp() {
       }
     } finally {
       setReceiptSharing(false);
+      receiptShareInFlightRef.current = false;
     }
     // isPaywalled deliberately included: without it this callback would
     // freeze the read-only check at whatever isPaywalled was on first
@@ -529,7 +554,8 @@ export default function Webapp() {
   }, [isPaywalled]);
 
   const confirmReceiptShare = useCallback(() => {
-    if (!receiptSharePayload) return;
+    if (!receiptSharePayload || receiptShareConfirmedRef.current) return;
+    receiptShareConfirmedRef.current = true;
     const { file, whatsappUrl } = receiptSharePayload;
     const downloadUrl = URL.createObjectURL(file);
     const a = document.createElement('a');
@@ -542,6 +568,8 @@ export default function Webapp() {
     window.open(whatsappUrl, '_blank');
     setReceiptShareSent(true);
     setReceiptSharePayload(null);
+    // Deliberately not resetting receiptShareConfirmedRef here — see the
+    // comment on it above.
   }, [receiptSharePayload]);
 
   // Payment-reminder quick action (POST /api/notifications/whatsapp,
