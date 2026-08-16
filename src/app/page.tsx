@@ -2243,7 +2243,10 @@ export default function Webapp() {
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
     setNewOrderError(null);
 
-    if (!newOrderForm.customerName.trim()) {
+    // Name is required unless the order is a fully anonymous walk-in sale
+    // (both name and phone left blank) - matches createOrderJsonSchema's
+    // if/then on the backend, which is the actual enforcement.
+    if (!newOrderForm.customerName.trim() && newOrderForm.phone.trim()) {
       setNewOrderError('Customer name is required.');
       return;
     }
@@ -2280,7 +2283,10 @@ export default function Webapp() {
         '/api/orders',
         {
           customer: {
-            name: newOrderForm.customerName.trim(),
+            // Omitted (not '') when blank - an empty string would fail the
+            // backend's minLength check even for a legitimately anonymous
+            // (name+phone both blank) walk-in sale.
+            name: newOrderForm.customerName.trim() || undefined,
             phone: newOrderForm.phone.trim() || null,
             address: newOrderForm.address.trim() || undefined,
           },
@@ -2993,7 +2999,7 @@ export default function Webapp() {
                                   🎂
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName} — {o.cakeCategory}</h4>
+                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName || 'Walk-in customer'} — {o.cakeCategory}</h4>
                                   <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
                                     {new Date(`${o.deliveryDate}T00:00:00`).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
                                     {o.deliveryTime ? ` • ${o.deliveryTime}` : ''} • <span className="text-[var(--accent)] font-semibold">{o.status}</span>
@@ -3131,7 +3137,7 @@ export default function Webapp() {
                                   </div>
                                 </div>
 
-                                <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.customerName}</h3>
+                                <h3 className="font-serif font-bold text-lg text-[var(--text-primary)] mb-1 leading-snug">{o.customerName || 'Walk-in customer'}</h3>
                                 <p className="text-xs text-[var(--text-secondary)]">{o.phone || 'No phone on file'}</p>
                               </div>
 
@@ -3284,7 +3290,7 @@ export default function Webapp() {
                     {!customersLoading &&
                       customersList.map((c) => {
                         const colors = ['bg-amber-100 dark:bg-amber-950/30 text-amber-800 dark:text-amber-400 border-amber-200 dark:border-amber-900', 'bg-orange-100 dark:bg-orange-950/30 text-orange-800 dark:text-orange-400 border-orange-200 dark:border-orange-900', 'bg-orange-100 dark:bg-orange-950/30 text-orange-800 dark:text-orange-400 border-orange-200 dark:border-orange-900', 'bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-300 border-neutral-200 dark:border-neutral-700'];
-                        const initial = c.name.charAt(0);
+                        const initial = (c.name || '?').charAt(0);
                         return (
                           <div
                             key={c.customerId}
@@ -3566,7 +3572,7 @@ export default function Webapp() {
                                     <div className="flex items-center gap-4">
                                       <span className="text-xs font-bold text-[var(--accent)]">{o.orderNumber}</span>
                                       <div>
-                                        <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName}</h4>
+                                        <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName || 'Walk-in customer'}</h4>
                                         <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{o.status} • ₹{o.totalPrice.toLocaleString('en-IN')}</p>
                                       </div>
                                     </div>
@@ -4417,7 +4423,6 @@ export default function Webapp() {
                                 value={newOrderForm.customerName}
                                 onChange={(e) => setNewOrderForm({ ...newOrderForm, customerName: e.target.value })}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
-                                required
                               />
                               <input
                                 type="tel"
@@ -4427,6 +4432,11 @@ export default function Webapp() {
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
                               />
                             </div>
+                            {!newOrderForm.customerName.trim() && !newOrderForm.phone.trim() && (
+                              <p className="text-[11px] text-[var(--text-secondary)] mb-3 -mt-2">
+                                No name or phone — this will be logged as a walk-in sale.
+                              </p>
+                            )}
                             <input
                               type="text"
                               placeholder="Delivery Address (optional)"
@@ -4980,31 +4990,37 @@ export default function Webapp() {
 
                             <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
                               <h5 className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">Customer</h5>
-                              <p className="text-sm font-bold">{selectedOrderDetail.customer.name}</p>
-                              <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.phone || 'No phone on file'}</p>
-                              {selectedOrderDetail.customer.address && (
-                                <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.address}</p>
+                              {selectedOrderDetail.customer ? (
+                                <>
+                                  <p className="text-sm font-bold">{selectedOrderDetail.customer.name}</p>
+                                  <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.phone || 'No phone on file'}</p>
+                                  {selectedOrderDetail.customer.address && (
+                                    <p className="text-xs text-[var(--text-secondary)] mt-0.5">{selectedOrderDetail.customer.address}</p>
+                                  )}
+                                  <div className="grid grid-cols-2 gap-3 mt-3">
+                                    {selectedOrderDetail.customer.phone && (
+                                      <a
+                                        href={`https://wa.me/${selectedOrderDetail.customer.phone.replace(/\D/g, '')}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                      >
+                                        <MessageSquare size={14} className="text-emerald-600" /> Message
+                                      </a>
+                                    )}
+                                    {selectedOrderDetail.customer.phone && (
+                                      <a
+                                        href={`tel:${selectedOrderDetail.customer.phone}`}
+                                        className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                                      >
+                                        <Phone size={14} className="text-blue-600" /> Call
+                                      </a>
+                                    )}
+                                  </div>
+                                </>
+                              ) : (
+                                <p className="text-sm font-bold text-[var(--text-secondary)]">Walk-in customer — no name or phone on file</p>
                               )}
-                              <div className="grid grid-cols-2 gap-3 mt-3">
-                                {selectedOrderDetail.customer.phone && (
-                                  <a
-                                    href={`https://wa.me/${selectedOrderDetail.customer.phone.replace(/\D/g, '')}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
-                                  >
-                                    <MessageSquare size={14} className="text-emerald-600" /> Message
-                                  </a>
-                                )}
-                                {selectedOrderDetail.customer.phone && (
-                                  <a
-                                    href={`tel:${selectedOrderDetail.customer.phone}`}
-                                    className="py-2.5 text-xs font-bold rounded-xl border border-[var(--border)] flex items-center justify-center gap-2 hover:bg-neutral-50 dark:hover:bg-neutral-900"
-                                  >
-                                    <Phone size={14} className="text-blue-600" /> Call
-                                  </a>
-                                )}
-                              </div>
                             </div>
 
                             <div className="bg-[var(--surface)] p-4 rounded-2xl border border-[var(--border)]">
@@ -5131,7 +5147,7 @@ export default function Webapp() {
                             {/* Header Overview Card */}
                             <div className="bg-[var(--background)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm text-center mb-4 flex flex-col items-center">
                               <div className="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-950/30 text-amber-800 dark:text-amber-400 border border-amber-200 dark:border-amber-900 flex items-center justify-center font-bold text-2xl mb-3 shadow-inner">
-                                {selectedCustomerProfile.name.charAt(0)}
+                                {(selectedCustomerProfile.name || 'Walk-in customer').charAt(0)}
                               </div>
                               <h4 className="font-serif font-bold text-xl flex items-center gap-1.5">
                                 {selectedCustomerProfile.name}
@@ -5214,7 +5230,7 @@ export default function Webapp() {
                               }}
                               className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-4 rounded-2xl shadow-md transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
                             >
-                              <Plus size={16} /> New Order for {selectedCustomerProfile.name.split(' ')[0]}
+                              <Plus size={16} /> New Order for {(selectedCustomerProfile.name || 'Walk-in customer').split(' ')[0]}
                             </button>
                           </>
                         )}
