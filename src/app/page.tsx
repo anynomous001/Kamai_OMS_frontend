@@ -685,7 +685,7 @@ export default function Webapp() {
     id: string;
     orderId: string;
     status: RealOrderStatus;
-    customer: { name: string; phone: string | null; address: string | null };
+    customer: { name: string; phone: string | null; address: string | null } | null;
     cake: { category: string; flavour: string; weightInPounds: number | null; quantity: number | null };
     occasion: string | null;
     customInstructions: string | null;
@@ -713,9 +713,9 @@ export default function Webapp() {
     const weightStr = weight !== null && weight !== undefined ? String(weight) : '';
     const matchesPreset = (WEIGHT_PRESETS_LB as readonly string[]).includes(weightStr);
     setEditOrderForm({
-      customerName: d.customer.name || '',
-      phone: d.customer.phone || '',
-      address: d.customer.address || '',
+      customerName: d.customer?.name || '',
+      phone: d.customer?.phone || '',
+      address: d.customer?.address || '',
       cakeCategory: d.cake.category || CAKE_CATEGORIES[0],
       flavour: d.cake.flavour || CAKE_FLAVOURS[0],
       weightPreset: matchesPreset ? (weightStr as (typeof WEIGHT_PRESETS_LB)[number]) : 'custom',
@@ -1546,7 +1546,7 @@ export default function Webapp() {
     setRecordPaymentSubmitting(true);
     try {
       await api.put(`/api/orders/${recordPaymentOrderNumber}`, {
-        customer: { name: d.customer.name, phone: d.customer.phone, address: d.customer.address ?? undefined },
+        customer: { name: d.customer?.name, phone: d.customer?.phone, address: d.customer?.address ?? undefined },
         cake: {
           category: d.cake.category,
           flavour: d.cake.flavour,
@@ -7310,7 +7310,7 @@ export default function Webapp() {
                         {/* Read-only context — total/paid/balance/status */}
                         <div className="bg-[var(--background)] p-4 rounded-2xl border border-[var(--border)] mb-5">
                           <p className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider mb-2">
-                            {recordPaymentOrderNumber} • {recordPaymentDetail.customer.name}
+                            {recordPaymentOrderNumber} • {recordPaymentDetail.customer?.name || 'Walk-in customer'}
                           </p>
                           <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Total</span><span className="font-bold">₹{recordPaymentDetail.payment.totalPrice.toLocaleString('en-IN')}</span></div>
                           <div className="flex justify-between text-xs py-1"><span className="text-[var(--text-secondary)]">Paid So Far</span><span className="font-bold">₹{recordPaymentDetail.payment.advancePaid.toLocaleString('en-IN')}</span></div>
