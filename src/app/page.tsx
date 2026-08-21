@@ -70,6 +70,19 @@ interface DashboardSummary {
     month: string | null;
     orders: DashboardUpcomingOrder[];
   };
+  // Optional for the same stale-backend reason as upcomingOrders above.
+  // expectedToBeSoldThisMonth is deliberately not surfaced in its own card
+  // - it's the same non-cancelled/deliveryDate-this-month definition the
+  // existing "This Month's Revenue" card already shows (sourced from
+  // GET /api/analytics/summary?months=1), so a second card would just be
+  // the same number twice.
+  monthlyFinancials?: {
+    deliveredThisMonth: number;
+    amountSoldThisMonth: number;
+    expectedToBeSoldThisMonth: number;
+    dueThisMonth: number;
+    advanceCollectedThisMonth: number;
+  };
 }
 
 // Real order-list status vocabulary (Pending/Confirmed/In Progress/Ready/
@@ -253,6 +266,7 @@ interface RealBakerProfile {
     trialEndsOn: string | null;
     trialDaysRemaining: number;
     nextBillingDate: string | null;
+    isFounderAccount: boolean;
   };
 }
 
@@ -483,10 +497,32 @@ export default function Webapp() {
   // a fixed past timestamp once set, so trialDaysRemaining reaching 0 is
   // just as reliable a signal, without calling an impure Date.now() during
   // render.
+  //
+  // isFounderAccount short-circuits this to false regardless of status/
+  // trialDaysRemaining, mirroring write-access.ts's exact server-side
+  // condition. Without this, the two layers only agreed by coincidence
+  // whenever a founder account's subscriptionStatus happened to read
+  // ACTIVE — if that value ever drifted for any reason (it already has,
+  // once, on the real founder account), the backend would still permit
+  // every write via isFounderAccount while this UI falsely showed the
+  // full paywall, with no way to tell the difference from inside the app
+  // (2026-08-21 audit).
   const isPaywalled =
     bakerProfile != null &&
+    !bakerProfile.subscription.isFounderAccount &&
     bakerProfile.subscription.status !== 'ACTIVE' &&
     bakerProfile.subscription.trialDaysRemaining <= 0;
+
+  // A baker mid-authorization (just redirected to Razorpay's checkout,
+  // or waiting on the webhook to land) is still isPaywalled — writes are
+  // genuinely still blocked server-side, that part is unchanged. This
+  // only controls which MESSAGE is shown: "your trial ended, subscribe"
+  // is confusing and wrong for someone who just tried to pay, so the
+  // banner/toast below branch on this instead of showing the generic
+  // paywall copy. Not shown for a founder account (isPaywalled is
+  // already false there, short-circuiting this too via bakerProfile
+  // access being guarded the same way).
+  const isPendingConfirmation = isPaywalled && bakerProfile?.subscription.status === 'PENDING';
 
   // Read-only paywall (trial-expired, unsubscribed): the banner is
   // dismissible for this session only — plain component state, not
@@ -965,7 +1001,20 @@ export default function Webapp() {
       fetchBillingStatus();
       fetchBakerProfile();
     } catch (err: any) {
-      setSubscriptionError(err.message || 'Failed to start subscription.');
+      // 409 here specifically means the backend's "already active or
+      // pending" guard fired (see billing.service.ts's createSubscription) -
+      // most likely a baker re-clicking Subscribe while their previous
+      // attempt is still within its 30-minute confirmation window. The
+      // raw backend message ("Subscription already active or pending")
+      // reads like a fixed, hopeless error rather than "wait a bit and
+      // try again," so show a clearer one for this specific case.
+      if (err.status === 409) {
+        setSubscriptionError(
+          'You already have a subscription attempt in progress — please wait a few minutes and try again, or contact support.',
+        );
+      } else {
+        setSubscriptionError(err.message || 'Failed to start subscription.');
+      }
     } finally {
       setSubscriptionSubmitting(false);
     }
@@ -2648,26 +2697,52 @@ export default function Webapp() {
                 usable. Dismissible for this session only — plain
                 component state, so it reappears on next reload/visit,
                 not gone forever from one click. See isPaywalled above
-                for the exact gating condition. */}
+                for the exact gating condition.
+
+                Branches on isPendingConfirmation: a baker who just tried
+                to pay and is waiting on the webhook (or whose first
+                attempt is still within the 30-minute window before it's
+                treated as abandoned) sees a distinct "confirming your
+                payment" message instead of "trial ended, subscribe" —
+                which would be actively wrong and confusing here — with a
+                Support path instead of a Subscribe button, since
+                resubmitting mid-confirmation is more likely to confuse
+                than help. */}
             {isPaywalled && !readOnlyBannerDismissed && (
               <div className="w-full bg-[var(--accent)] text-white px-4 py-2.5 flex items-center gap-2.5 text-[11px] font-medium">
-                <AlertCircle size={14} className="flex-shrink-0" />
-                <span className="flex-1 leading-snug">Your free trial has ended — you can view everything, but changes are paused until you subscribe.</span>
-                <button
-                  type="button"
-                  onClick={() => setActiveSheet('help-support')}
-                  className="underline font-semibold whitespace-nowrap cursor-pointer flex-shrink-0"
-                >
-                  Support
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmSubscription}
-                  disabled={subscriptionSubmitting}
-                  className="bg-white text-[var(--accent)] px-3 py-1 rounded-full font-bold whitespace-nowrap cursor-pointer disabled:opacity-60 flex-shrink-0"
-                >
-                  {subscriptionSubmitting ? '...' : 'Subscribe'}
-                </button>
+                {isPendingConfirmation ? (
+                  <>
+                    <Clock size={14} className="flex-shrink-0" />
+                    <span className="flex-1 leading-snug">We&apos;re confirming your payment — this can take a few minutes. If this doesn&apos;t resolve, contact support.</span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSheet('help-support')}
+                      className="bg-white text-[var(--accent)] px-3 py-1 rounded-full font-bold whitespace-nowrap cursor-pointer flex-shrink-0"
+                    >
+                      Support
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle size={14} className="flex-shrink-0" />
+                    <span className="flex-1 leading-snug">Your free trial has ended — you can view everything, but changes are paused until you subscribe.</span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSheet('help-support')}
+                      className="underline font-semibold whitespace-nowrap cursor-pointer flex-shrink-0"
+                    >
+                      Support
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmSubscription}
+                      disabled={subscriptionSubmitting}
+                      className="bg-white text-[var(--accent)] px-3 py-1 rounded-full font-bold whitespace-nowrap cursor-pointer disabled:opacity-60 flex-shrink-0"
+                    >
+                      {subscriptionSubmitting ? '...' : 'Subscribe'}
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   onClick={() => setReadOnlyBannerDismissed(true)}
@@ -2682,19 +2757,39 @@ export default function Webapp() {
             {/* Blocked-write toast — shown briefly whenever a write
                 handler bails out early because isPaywalled is true (see
                 showReadOnlyBlockedMessage). Server-side enforcement is
-                what actually matters; this is just the explanation. */}
+                what actually matters; this is just the explanation.
+                Branches on isPendingConfirmation the same way the banner
+                above does, and reads it at render time rather than at
+                the moment showReadOnlyBlockedMessage() was called, so it
+                stays accurate even if subscription.status changes while
+                the toast happens to be visible. */}
             {readOnlyToastVisible && (
               <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[110] w-[calc(100%-2rem)] max-w-[440px] bg-[var(--text-primary)] text-[var(--background)] rounded-2xl shadow-2xl px-4 py-3.5 flex items-center gap-3">
-                <span className="text-xl flex-shrink-0">⏰</span>
+                <span className="text-xl flex-shrink-0">{isPendingConfirmation ? '⏳' : '⏰'}</span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-[11.5px] font-medium leading-snug">Your free trial has ended — subscribe to make changes again.</p>
-                  <button
-                    type="button"
-                    onClick={() => { setReadOnlyToastVisible(false); setActiveSheet('subscription-autopay'); fetchBillingStatus(); }}
-                    className="text-[11px] font-bold underline mt-1 cursor-pointer"
-                  >
-                    View Billing
-                  </button>
+                  {isPendingConfirmation ? (
+                    <>
+                      <p className="text-[11.5px] font-medium leading-snug">We&apos;re still confirming your payment — changes are paused until it goes through.</p>
+                      <button
+                        type="button"
+                        onClick={() => { setReadOnlyToastVisible(false); setActiveSheet('help-support'); }}
+                        className="text-[11px] font-bold underline mt-1 cursor-pointer"
+                      >
+                        Contact Support
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-[11.5px] font-medium leading-snug">Your free trial has ended — subscribe to make changes again.</p>
+                      <button
+                        type="button"
+                        onClick={() => { setReadOnlyToastVisible(false); setActiveSheet('subscription-autopay'); fetchBillingStatus(); }}
+                        className="text-[11px] font-bold underline mt-1 cursor-pointer"
+                      >
+                        View Billing
+                      </button>
+                    </>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -2855,6 +2950,57 @@ export default function Webapp() {
                       </div>
 
                     </div>
+
+                    {/* This Month, In Detail — GET /api/dashboard/summary's
+                        monthlyFinancials block. Kept as its own labeled
+                        section rather than mixed into the KPI grid above,
+                        matching the backend's own design intent: the KPI
+                        grid is a fast daily glance, this is a reporting
+                        surface. expectedToBeSoldThisMonth isn't repeated
+                        here - see the DashboardSummary type comment. */}
+                    {dashboardSummary?.monthlyFinancials && (
+                      <div className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm">
+                        <h3 className="font-serif text-lg font-semibold text-[var(--text-primary)] mb-4">This Month, In Detail</h3>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <Truck size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">{dashboardSummary.monthlyFinancials.deliveredThisMonth}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Orders delivered this month</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <CheckCircle2 size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.amountSoldThisMonth.toLocaleString('en-IN')}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Sold from delivered orders</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <Clock size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.dueThisMonth.toLocaleString('en-IN')}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Still due this month</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <Wallet size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.advanceCollectedThisMonth.toLocaleString('en-IN')}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Cash collected this month</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {dashboardError && (
                       <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
