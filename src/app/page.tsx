@@ -69,6 +69,19 @@ interface DashboardSummary {
     month: string | null;
     orders: DashboardUpcomingOrder[];
   };
+  // Optional for the same stale-backend reason as upcomingOrders above.
+  // expectedToBeSoldThisMonth is deliberately not surfaced in its own card
+  // - it's the same non-cancelled/deliveryDate-this-month definition the
+  // existing "This Month's Revenue" card already shows (sourced from
+  // GET /api/analytics/summary?months=1), so a second card would just be
+  // the same number twice.
+  monthlyFinancials?: {
+    deliveredThisMonth: number;
+    amountSoldThisMonth: number;
+    expectedToBeSoldThisMonth: number;
+    dueThisMonth: number;
+    advanceCollectedThisMonth: number;
+  };
 }
 
 // Real order-list status vocabulary (Pending/Confirmed/In Progress/Ready/
@@ -2921,6 +2934,57 @@ export default function Webapp() {
                       </div>
 
                     </div>
+
+                    {/* This Month, In Detail — GET /api/dashboard/summary's
+                        monthlyFinancials block. Kept as its own labeled
+                        section rather than mixed into the KPI grid above,
+                        matching the backend's own design intent: the KPI
+                        grid is a fast daily glance, this is a reporting
+                        surface. expectedToBeSoldThisMonth isn't repeated
+                        here - see the DashboardSummary type comment. */}
+                    {dashboardSummary?.monthlyFinancials && (
+                      <div className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm">
+                        <h3 className="font-serif text-lg font-semibold text-[var(--text-primary)] mb-4">This Month, In Detail</h3>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <Truck size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">{dashboardSummary.monthlyFinancials.deliveredThisMonth}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Orders delivered this month</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <CheckCircle2 size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.amountSoldThisMonth.toLocaleString('en-IN')}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Sold from delivered orders</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <Clock size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.dueThisMonth.toLocaleString('en-IN')}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Still due this month</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
+                              <Wallet size={16} className="text-[var(--accent)]" />
+                            </div>
+                            <div>
+                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.advanceCollectedThisMonth.toLocaleString('en-IN')}</span>
+                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Cash collected this month</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {dashboardError && (
                       <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
