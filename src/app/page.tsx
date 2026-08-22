@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Home as HomeIcon, ClipboardList, Users, Calendar as CalendarIcon,
   ShoppingBag, MoreHorizontal, Moon, Sun, ArrowUpRight, Plus,
-  ArrowLeft, Search, Bell, Check, X, Shield, Phone, MessageSquare,
+  Search, Bell, Check, X, Shield, Phone, MessageSquare,
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
@@ -99,6 +99,13 @@ interface RealOrderListItem {
   status: RealOrderStatus;
   totalPrice: number;
   balanceDue: number;
+  // Added for the calendar redesign (day-cell name badges + the 7-field
+  // order card) — GET /api/orders now returns these alongside the fields
+  // above.
+  cakeCategory: string;
+  quantity: number | null;
+  weightInPounds: number | null;
+  advancePaid: number;
 }
 
 // paymentStatus isn't present on the orders-list/dashboard endpoints (only
@@ -111,6 +118,51 @@ function derivePaymentStatus(totalPrice: number, balanceDue: number): PaymentSta
   if (balanceDue <= 0) return 'Paid';
   if (balanceDue >= totalPrice) return 'Unpaid';
   return 'Partially Paid';
+}
+
+// Calendar redesign: orderStatus color palette for day-cell order chips and
+// order-card status pills. Founder's spec defined 4 colors (Confirmed/
+// Pending/Paid/Cancelled) but orderStatus actually has 6 values — 'Paid'
+// isn't a real orderStatus (that's paymentStatus, handled separately via
+// derivePaymentStatus above). Kept the 4 given colors for their matching
+// statuses and added 2 more (In Progress, Ready) to cover the full enum.
+const ORDER_STATUS_COLORS: Record<RealOrderStatus, string> = {
+  Pending: '#FFC107',
+  Confirmed: '#4CAF50',
+  'In Progress': '#8B5CF6',
+  Ready: '#0D9488',
+  Delivered: '#2196F3',
+  Cancelled: '#9E9E9E',
+};
+
+// Pastel day-cell order chips (founder's reference: a soft-tint box per
+// order, not a solid-fill badge) — derived from ORDER_STATUS_COLORS rather
+// than a second hardcoded palette, so the two stay in sync by construction.
+// bg = the status hex at low alpha, text = the status hex itself (dark
+// enough on its own pastel tint to stay legible in both themes).
+function statusChipStyle(status: RealOrderStatus): { backgroundColor: string; color: string } {
+  const hex = ORDER_STATUS_COLORS[status];
+  return { backgroundColor: `${hex}26`, color: hex };
+}
+
+// "1" -> "1 pc", "2" -> "2 pcs"; falls back to weight when quantity isn't
+// set (orders can be priced by weight instead of piece count — see cake.
+// weightInPounds in the order-detail payload). Neither present -> em dash.
+function formatOrderQuantity(quantity: number | null, weightInPounds: number | null): string {
+  if (quantity !== null) return `${quantity} ${quantity === 1 ? 'pc' : 'pcs'}`;
+  if (weightInPounds !== null) return `${weightInPounds} lb`;
+  return '—';
+}
+
+// "2026-09" -> "Sept 26" — matches the founder's reference image exactly,
+// including "Sept" (not the standard 3-letter "Sep") for September.
+const MONTH_PILL_ABBREVIATIONS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sept', 'Oct', 'Nov', 'Dec',
+];
+function formatMonthPillLabel(monthStr: string): string {
+  const [year, month] = monthStr.split('-').map(Number);
+  return `${MONTH_PILL_ABBREVIATIONS[month - 1]} ${String(year).slice(2)}`;
 }
 
 // "2026-03" -> "Mar '26" — compact enough for 6 side-by-side labels on a
@@ -285,6 +337,16 @@ interface RealCalendarData {
   startDate: string;
   endDate: string;
   days: RealCalendarDay[];
+  monthlyStats: {
+    delivered: number;
+    estimatedTotal: number;
+  };
+}
+
+// GET /api/dashboard/calendar/months — backs the month-picker strip.
+interface RealCalendarMonthOverview {
+  month: string; // YYYY-MM
+  totalOrders: number;
 }
 
 interface RealBillingStatus {
@@ -1371,21 +1433,31 @@ export default function Webapp() {
   const [calendarMonth, setCalendarMonth] = useState(
     `${todayForCalendar.getFullYear()}-${String(todayForCalendar.getMonth() + 1).padStart(2, '0')}`,
   );
-  const [selectedCalendarDate, setSelectedCalendarDate] = useState(
-    todayForCalendar.toISOString().slice(0, 10),
-  );
+  // null until the baker taps a date — the order list starts in its
+  // "Select a date to view orders" empty state rather than defaulting to
+  // today, per the calendar redesign spec.
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState<string | null>(null);
   const [calendarData, setCalendarData] = useState<RealCalendarData | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarError, setCalendarError] = useState<string | null>(null);
 
-  // Whole month's orders (not just the selected date) so the list below
-  // the grid can show every date's group at once — clicking a calendar
-  // cell scrolls to that date's group via dateGroupRefs instead of
-  // re-fetching/re-filtering a single-date list.
+  // Whole month's orders, fetched once per month and grouped client-side
+  // by date (see calendarOrdersByDate below) — both the day-cell name
+  // badges and the order list for the selected date read from this same
+  // fetch, rather than issuing a separate request per date.
   const [calendarMonthOrders, setCalendarMonthOrders] = useState<RealOrderListItem[]>([]);
   const [calendarMonthOrdersLoading, setCalendarMonthOrdersLoading] = useState(false);
   const [calendarMonthOrdersError, setCalendarMonthOrdersError] = useState<string | null>(null);
-  const dateGroupRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  // No date selected initially (distinct from "today selected") so the
+  // order list starts in its "pick a date" empty state per the calendar
+  // redesign spec, rather than jumping straight to today's orders.
+  const orderListRef = useRef<HTMLDivElement | null>(null);
+
+  // Month-picker strip (GET /api/dashboard/calendar/months) — order counts
+  // for the 6-month window around calendarMonth, per the founder's
+  // reference image.
+  const [calendarMonthsOverview, setCalendarMonthsOverview] = useState<RealCalendarMonthOverview[]>([]);
+  const [calendarMonthsOverviewLoading, setCalendarMonthsOverviewLoading] = useState(false);
 
   // Bootstrap: the session lives in an httpOnly cookie the browser already
   // holds after a successful login, so on load we ask the backend whether
@@ -2166,6 +2238,22 @@ export default function Webapp() {
       .finally(() => setCalendarMonthOrdersLoading(false));
   }, [step, activeTab, calendarMonth]);
 
+  // Month-picker strip data (GET /api/dashboard/calendar/months) — order
+  // counts for the 6-month window centered on calendarMonth. Silently
+  // ignored on failure (no error banner) since the strip is a navigation
+  // convenience, not the primary calendar data the two effects above load.
+  useEffect(() => {
+    if (step !== 'dashboard' || activeTab !== 'calendar') return;
+    setCalendarMonthsOverviewLoading(true);
+    api
+      .get<{ success: boolean; data: { months: RealCalendarMonthOverview[] } }>(
+        `/api/dashboard/calendar/months?month=${calendarMonth}`,
+      )
+      .then((res) => setCalendarMonthsOverview(res.data.months))
+      .catch(() => {})
+      .finally(() => setCalendarMonthsOverviewLoading(false));
+  }, [step, activeTab, calendarMonth]);
+
   // OTP Timer countdown
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -2499,20 +2587,45 @@ export default function Webapp() {
   });
   const calendarDaysInMonth = new Date(calendarMonthYear, calendarMonthNum, 0).getDate();
   const calendarStartOffset = new Date(calendarMonthYear, calendarMonthNum - 1, 1).getDay();
-  const calendarMonthTotals = (calendarData?.days ?? []).reduce(
-    (acc, d) => ({
-      totalOrders: acc.totalOrders + d.totalOrders,
-      outstandingBalance: acc.outstandingBalance + d.outstandingBalance,
-    }),
-    { totalOrders: 0, outstandingBalance: 0 },
-  );
 
-  const shiftCalendarMonth = (delta: number) => {
-    const d = new Date(calendarMonthYear, calendarMonthNum - 1 + delta, 1);
-    setCalendarMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  // Navigation now happens by tapping a pill in the month-picker strip
+  // (goToMonth) or the "Back to today" link (goToToday) — no prev/next
+  // arrows, per the founder's reference image. Both clear the selected
+  // date so the order-list header never shows a stale date from a month
+  // that's no longer in view.
+  const goToMonth = (monthStr: string) => {
+    setCalendarMonth(monthStr);
+    setSelectedCalendarDate(null);
   };
-  const handlePrevMonth = () => shiftCalendarMonth(-1);
-  const handleNextMonth = () => shiftCalendarMonth(1);
+  const goToToday = () => {
+    const t = new Date();
+    const todayStr = t.toISOString().slice(0, 10);
+    setCalendarMonth(`${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}`);
+    setSelectedCalendarDate(todayStr);
+    orderListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  // Groups the already-fetched whole-month order list by delivery date —
+  // shared by the day-cell name badges (grid, below) and the selected-
+  // date order list, so both read from one fetch instead of two.
+  const calendarOrdersByDate = useMemo(() => {
+    const map: Record<string, RealOrderListItem[]> = {};
+    for (const o of calendarMonthOrders) {
+      (map[o.deliveryDate] ||= []).push(o);
+    }
+    return map;
+  }, [calendarMonthOrders]);
+
+  const todayCalendarDateStr = new Date().toISOString().slice(0, 10);
+
+  const selectedDateOrders = selectedCalendarDate ? calendarOrdersByDate[selectedCalendarDate] ?? [] : [];
+  const selectedDateLabel = selectedCalendarDate
+    ? new Date(`${selectedCalendarDate}T00:00:00`).toLocaleDateString('en-US', {
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short',
+      })
+    : null;
 
 
   useEffect(() => {
@@ -3517,24 +3630,8 @@ export default function Webapp() {
                 <div className="w-full animate-fadeIn">
 
                   {/* Header Title */}
-                  <div className="mb-6 flex justify-between items-center">
+                  <div className="mb-6">
                     <h2 className="font-serif text-3xl md:text-4xl font-bold text-[var(--text-primary)]">Schedule</h2>
-                    <span
-                      onClick={() => {
-                        const t = new Date();
-                        const todayStr = t.toISOString().slice(0, 10);
-                        setCalendarMonth(`${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}`);
-                        setSelectedCalendarDate(todayStr);
-                        // Only scrolls if today's group is already rendered
-                        // (i.e. we were already viewing this month) — a
-                        // month switch triggers a refetch and the list
-                        // naturally lands at the top.
-                        dateGroupRefs.current[todayStr]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                      }}
-                      className="text-xs font-bold text-[var(--accent)] hover:underline cursor-pointer bg-[var(--surface)] py-1.5 px-3.5 rounded-full border border-[var(--border)] shadow-sm"
-                    >
-                      Today
-                    </span>
                   </div>
 
                   {calendarError && (
@@ -3546,47 +3643,72 @@ export default function Webapp() {
                   {/* Calendar Layout: stacked vertically for mobile view */}
                   <div className="flex flex-col gap-6 w-full">
 
-                    {/* Custom high-fidelity Calendar Component — real GET
-                        /api/dashboard/calendar. Cells show per-day order
-                        counts/status, not customer names (that endpoint
-                        doesn't return per-order detail — only Orders-list
-                        style endpoints do, which is what the day's
-                        delivery list below uses). */}
+                    {/* Monthly calendar grid — day cells source their order
+                        chips from calendarOrdersByDate (the whole-month
+                        GET /api/orders fetch, grouped by date), not from
+                        GET /api/dashboard/calendar (which only carries
+                        per-day aggregate counts). */}
                     <div className="bg-[var(--surface)] rounded-[28px] border border-[var(--border)] p-5 shadow-sm w-full flex flex-col items-center">
 
-                      {/* Month Swapping Header */}
-                      <div className="w-full flex flex-col items-center mb-6">
-                        <div className="w-full flex items-center justify-between px-1 mb-2">
-                          <button
-                            onClick={handlePrevMonth}
-                            className="p-2 rounded-[16px] bg-[var(--background)] hover:bg-neutral-100 dark:hover:bg-neutral-900 text-[var(--text-primary)] transition-all border border-[var(--border)] cursor-pointer"
-                          >
-                            <ArrowLeft size={16} />
-                          </button>
-
-                          <span className="text-base font-extrabold text-[var(--text-primary)] font-serif">
-                            {calendarMonthLabel}
-                          </span>
-
-                          <button
-                            onClick={handleNextMonth}
-                            className="p-2 rounded-[16px] bg-[var(--background)] hover:bg-neutral-100 text-[var(--text-primary)] transition-all border border-[var(--border)] cursor-pointer rotate-180"
-                          >
-                            <ArrowLeft size={16} />
-                          </button>
-                        </div>
-
-                        <div className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
+                      {/* Month title + stats + "back to today" */}
+                      <div className="w-full flex flex-col items-center mb-4 text-center">
+                        <span className="text-base font-extrabold text-[var(--text-primary)] font-serif">
+                          {calendarMonthLabel}
+                        </span>
+                        <div className="text-[11.5px] font-semibold text-[var(--text-secondary)] mt-1">
                           {calendarLoading ? (
                             <span>Loading…</span>
                           ) : (
                             <>
-                              Orders this month: <span className="text-emerald-600 dark:text-emerald-400 font-bold">{calendarMonthTotals.totalOrders}</span>
+                              Delivered: <span className="text-[var(--text-primary)] font-bold">₹{(calendarData?.monthlyStats.delivered ?? 0).toLocaleString('en-IN')}</span>
                               <span className="mx-2">•</span>
-                              Outstanding: <span className="text-amber-800 dark:text-amber-500 font-bold">₹{calendarMonthTotals.outstandingBalance.toLocaleString('en-IN')}</span>
+                              Est. Total: <span className="text-[var(--text-primary)] font-bold">₹{(calendarData?.monthlyStats.estimatedTotal ?? 0).toLocaleString('en-IN')}</span>
                             </>
                           )}
                         </div>
+                        <span
+                          onClick={goToToday}
+                          className="text-[11px] font-bold text-[var(--accent)] hover:underline cursor-pointer mt-1"
+                        >
+                          Back to today
+                        </span>
+                      </div>
+
+                      {/* Month-picker strip — 6-month window (GET
+                          /api/dashboard/calendar/months), 1 month ahead of
+                          calendarMonth then calendarMonth then 4 behind,
+                          per the founder's reference image. Horizontally
+                          scrollable; tapping a pill re-centers the window
+                          on that month, so tapping the edge pill repeatedly
+                          walks further back/forward without needing
+                          separate prev/next arrows. */}
+                      <div className="w-full flex gap-2 overflow-x-auto no-scrollbar pb-4 mb-4 border-b border-[var(--border)]/60 -mx-1 px-1">
+                        {(calendarMonthsOverviewLoading && calendarMonthsOverview.length === 0
+                          ? Array.from({ length: 6 })
+                          : calendarMonthsOverview
+                        ).map((entry, idx) => {
+                          if (!entry) {
+                            return <div key={idx} className="h-[52px] w-[74px] shrink-0 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />;
+                          }
+                          const overview = entry as RealCalendarMonthOverview;
+                          const isActive = overview.month === calendarMonth;
+                          return (
+                            <button
+                              key={overview.month}
+                              onClick={() => goToMonth(overview.month)}
+                              className={`shrink-0 flex flex-col items-center justify-center gap-0.5 rounded-2xl px-3.5 py-2 min-w-[74px] transition-all cursor-pointer ${
+                                isActive
+                                  ? 'bg-[var(--text-primary)] text-[var(--background)]'
+                                  : 'bg-[var(--background)] text-[var(--text-primary)] border border-[var(--border)] hover:border-[var(--accent)]/40'
+                              }`}
+                            >
+                              <span className="text-xs font-extrabold font-serif">{formatMonthPillLabel(overview.month)}</span>
+                              <span className={`text-[9.5px] font-semibold ${isActive ? 'text-[var(--background)]/70' : 'text-[var(--text-secondary)]'}`}>
+                                {overview.totalOrders} {overview.totalOrders === 1 ? 'order' : 'orders'}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
 
                       {/* Weekdays Headers */}
@@ -3595,7 +3717,7 @@ export default function Webapp() {
                       </div>
 
                       {/* Days Grid */}
-                      <div className="grid grid-cols-7 gap-y-3 gap-x-1.5 w-full">
+                      <div className="grid grid-cols-7 gap-1.5 w-full">
                         {/* Render offsets */}
                         {Array.from({ length: calendarStartOffset }).map((_, idx) => (
                           <div key={`offset-${idx}`} className="py-2.5"></div>
@@ -3606,35 +3728,49 @@ export default function Webapp() {
                           const dayInt = d + 1;
                           const dateStr = `${calendarMonth}-${String(dayInt).padStart(2, '0')}`;
                           const isSelected = selectedCalendarDate === dateStr;
-                          const isToday = dateStr === new Date().toISOString().slice(0, 10);
-                          const dayData = calendarData?.days.find((dd) => dd.date === dateStr);
-                          const hasOrders = !!dayData && dayData.totalOrders > 0;
+                          const isToday = dateStr === todayCalendarDateStr;
+                          const dayOrders = calendarOrdersByDate[dateStr] ?? [];
+                          const visibleOrders = dayOrders.slice(0, 2);
+                          const overflowCount = dayOrders.length - visibleOrders.length;
 
                           return (
                             <div
                               key={d}
                               onClick={() => {
                                 setSelectedCalendarDate(dateStr);
-                                dateGroupRefs.current[dateStr]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                orderListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                               }}
-                              className={`rounded-[18px] border p-1.5 flex flex-col items-center min-h-[72px] justify-center gap-1 cursor-pointer transition-all shadow-sm w-full ${
+                              className={`relative rounded-[14px] border p-1 flex flex-col items-start min-h-[52px] gap-0.5 cursor-pointer transition-all w-full ${
                                 isSelected
-                                  ? 'border-[var(--text-primary)] ring-1 ring-[var(--text-primary)] bg-[var(--surface)]'
-                                  : hasOrders
-                                    ? 'bg-[#E6F4EA] dark:bg-emerald-950/20 border-[#CEEAD6] dark:border-emerald-900 hover:border-[var(--accent)]'
-                                    : 'bg-transparent border-transparent hover:border-[var(--border)]'
+                                  ? 'border-[var(--accent)] border-2 bg-[var(--accent)]/8'
+                                  : isToday
+                                    ? 'border-[var(--accent)] border-2 bg-[var(--surface)]'
+                                    : 'bg-[var(--surface)] border-[var(--border)]/60 hover:border-[var(--accent)]/40'
                               }`}
                             >
-                              {isToday ? (
-                                <span className="w-5 h-5 rounded-full bg-[var(--accent)] text-white flex items-center justify-center text-[10px] font-extrabold shadow-sm">
+                              <div className="w-full flex items-center justify-between px-0.5">
+                                <span className={`text-xs font-extrabold ${isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}>
                                   {dayInt}
                                 </span>
-                              ) : (
-                                <span className="text-xs font-extrabold text-[var(--text-primary)]">{dayInt}</span>
-                              )}
-                              {hasOrders && (
-                                <span className="text-[8.5px] font-extrabold text-[#137333] dark:text-emerald-400">
-                                  {dayData!.totalOrders} {dayData!.totalOrders === 1 ? 'order' : 'orders'}
+                                {isToday && (
+                                  <span className="text-[6.5px] font-extrabold uppercase tracking-wide text-[var(--accent)]">Today</span>
+                                )}
+                              </div>
+
+                              {visibleOrders.map((o) => (
+                                <div
+                                  key={o.orderId}
+                                  className="w-full leading-tight px-1 py-0.5 rounded-[6px] truncate"
+                                  style={statusChipStyle(o.status)}
+                                  title={`${o.customerName || 'Walk-in customer'} — ${o.cakeCategory}`}
+                                >
+                                  <div className="text-[8px] font-bold truncate">{o.customerName || 'Walk-in'}</div>
+                                  <div className="text-[7px] font-medium opacity-80 truncate">{o.cakeCategory}</div>
+                                </div>
+                              ))}
+                              {overflowCount > 0 && (
+                                <span className="text-[7.5px] font-bold text-[var(--text-secondary)]">
+                                  +{overflowCount} more
                                 </span>
                               )}
                             </div>
@@ -3642,30 +3778,16 @@ export default function Webapp() {
                         })}
                       </div>
 
-                      {/* Legend Footer */}
-                      <div className="w-full flex justify-center items-center gap-6 mt-6 pt-4 border-t border-[var(--border)]/50 text-[10.5px] text-[var(--text-secondary)] font-bold">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-3 h-3 rounded-full bg-[var(--accent)]"></span>
-                          <span>Today</span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-3 h-3 rounded-full bg-[#E6F4EA] border border-[#CEEAD6]"></span>
-                          <span>Has orders</span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-3 h-3 rounded-full bg-[var(--text-primary)]"></span>
-                          <span>Selected</span>
-                        </div>
-                      </div>
-
                     </div>
 
-                    {/* Right Column — whole month's orders, grouped by
-                        date. Calendar day-cell clicks (above) scroll to
-                        the matching group via dateGroupRefs rather than
-                        re-fetching/re-filtering a single-date list. */}
-                    <div className="flex flex-col gap-5">
-                      <h3 className="font-serif text-lg font-bold">Deliveries this month</h3>
+                    {/* Order list for the selected date only — three-level
+                        drill-down: grid -> this list -> order detail sheet
+                        (openOrderDetail). Reads from calendarOrdersByDate,
+                        the same whole-month fetch the grid above uses. */}
+                    <div ref={orderListRef} className="flex flex-col gap-5 scroll-mt-4">
+                      <h3 className="font-serif text-lg font-bold">
+                        {selectedDateLabel ? `${selectedDateLabel} — ${selectedDateOrders.length} ${selectedDateOrders.length === 1 ? 'order' : 'orders'}` : 'Orders'}
+                      </h3>
 
                       {calendarMonthOrdersError && (
                         <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center gap-2">
@@ -3675,66 +3797,59 @@ export default function Webapp() {
 
                       {calendarMonthOrdersLoading &&
                         [0, 1, 2].map((i) => (
-                          <div key={i} className="h-20 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
+                          <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
                         ))}
 
-                      {!calendarMonthOrdersLoading && !calendarMonthOrdersError && calendarMonthOrders.length === 0 && (
+                      {!calendarMonthOrdersLoading && !calendarMonthOrdersError && !selectedCalendarDate && (
                         <div className="text-center py-12 bg-[var(--surface)] rounded-[22px] border border-dashed border-[var(--border)]">
-                          <span className="text-2xl">🥣</span>
-                          <p className="text-xs text-[var(--text-secondary)] mt-2">No deliveries scheduled this month.</p>
+                          <span className="text-2xl">📅</span>
+                          <p className="text-xs text-[var(--text-secondary)] mt-2">Select a date to view orders.</p>
                         </div>
                       )}
 
-                      {!calendarMonthOrdersLoading &&
-                        (() => {
-                          const ordersByDate: Record<string, RealOrderListItem[]> = {};
-                          for (const o of calendarMonthOrders) {
-                            (ordersByDate[o.deliveryDate] ||= []).push(o);
-                          }
-                          const sortedDates = Object.keys(ordersByDate).sort();
+                      {!calendarMonthOrdersLoading && !calendarMonthOrdersError && selectedCalendarDate && selectedDateOrders.length === 0 && (
+                        <div className="text-center py-12 bg-[var(--surface)] rounded-[22px] border border-dashed border-[var(--border)]">
+                          <span className="text-2xl">🥣</span>
+                          <p className="text-xs text-[var(--text-secondary)] mt-2">No orders on this date.</p>
+                        </div>
+                      )}
 
-                          return sortedDates.map((dateKey) => {
-                            const isSelectedGroup = selectedCalendarDate === dateKey;
-                            const dateLabel = new Date(`${dateKey}T00:00:00`).toLocaleDateString('en-US', {
-                              weekday: 'short',
-                              day: 'numeric',
-                              month: 'short',
-                            });
-                            return (
-                              <div
-                                key={dateKey}
-                                ref={(el) => { dateGroupRefs.current[dateKey] = el; }}
-                                className="flex flex-col gap-3"
+                      {!calendarMonthOrdersLoading && !calendarMonthOrdersError && selectedDateOrders.map((o) => (
+                        <div
+                          key={o.orderId}
+                          className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex flex-col gap-3 hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                          onClick={() => openOrderDetail(o.orderNumber)}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-[var(--accent)]">{o.orderNumber}</span>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
+                                style={{ backgroundColor: ORDER_STATUS_COLORS[o.status] }}
                               >
-                                <h4 className={`text-xs font-bold uppercase tracking-wider ${isSelectedGroup ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`}>
-                                  {dateLabel}
-                                </h4>
-                                {ordersByDate[dateKey].map((o) => (
-                                  <div
-                                    key={o.orderId}
-                                    className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex items-center justify-between hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
-                                    onClick={() => openOrderDetail(o.orderNumber)}
-                                  >
-                                    <div className="flex items-center gap-4">
-                                      <span className="text-xs font-bold text-[var(--accent)]">{o.orderNumber}</span>
-                                      <div>
-                                        <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName || 'Walk-in customer'}</h4>
-                                        <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{o.status} • ₹{o.totalPrice.toLocaleString('en-IN')}</p>
-                                      </div>
-                                    </div>
+                                {o.status}
+                              </span>
+                              <ChevronRight size={14} className="text-[var(--text-secondary)]" />
+                            </div>
+                          </div>
 
-                                    <div className="flex items-center gap-2">
-                                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${o.balanceDue > 0 ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]' : 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100'}`}>
-                                        {o.balanceDue > 0 ? `₹${o.balanceDue.toLocaleString('en-IN')} Due` : 'Paid'}
-                                      </span>
-                                      <ChevronRight size={14} className="text-[var(--text-secondary)]" />
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            );
-                          });
-                        })()}
+                          <div>
+                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName || 'Walk-in customer'}</h4>
+                            <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+                              {o.cakeCategory} • {formatOrderQuantity(o.quantity, o.weightInPounds)}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2 pt-2 border-t border-[var(--border)]/60">
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${o.advancePaid > 0 ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100' : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-500 dark:text-neutral-400 border-[var(--border)]'}`}>
+                              Advance ₹{o.advancePaid.toLocaleString('en-IN')}
+                            </span>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]">
+                              Balance ₹{o.balanceDue.toLocaleString('en-IN')}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
 
                   </div>
