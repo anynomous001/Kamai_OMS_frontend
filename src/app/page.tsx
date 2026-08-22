@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Home as HomeIcon, ClipboardList, Users, Calendar as CalendarIcon,
   ShoppingBag, MoreHorizontal, Moon, Sun, ArrowUpRight, Plus,
-  ArrowLeft, Search, Bell, Check, X, Shield, Phone, MessageSquare,
+  Search, Bell, Check, X, Shield, Phone, MessageSquare,
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
@@ -120,7 +120,7 @@ function derivePaymentStatus(totalPrice: number, balanceDue: number): PaymentSta
   return 'Partially Paid';
 }
 
-// Calendar redesign: orderStatus color palette for day-cell name badges and
+// Calendar redesign: orderStatus color palette for day-cell order chips and
 // order-card status pills. Founder's spec defined 4 colors (Confirmed/
 // Pending/Paid/Cancelled) but orderStatus actually has 6 values — 'Paid'
 // isn't a real orderStatus (that's paymentStatus, handled separately via
@@ -135,6 +135,16 @@ const ORDER_STATUS_COLORS: Record<RealOrderStatus, string> = {
   Cancelled: '#9E9E9E',
 };
 
+// Pastel day-cell order chips (founder's reference: a soft-tint box per
+// order, not a solid-fill badge) — derived from ORDER_STATUS_COLORS rather
+// than a second hardcoded palette, so the two stay in sync by construction.
+// bg = the status hex at low alpha, text = the status hex itself (dark
+// enough on its own pastel tint to stay legible in both themes).
+function statusChipStyle(status: RealOrderStatus): { backgroundColor: string; color: string } {
+  const hex = ORDER_STATUS_COLORS[status];
+  return { backgroundColor: `${hex}26`, color: hex };
+}
+
 // "1" -> "1 pc", "2" -> "2 pcs"; falls back to weight when quantity isn't
 // set (orders can be priced by weight instead of piece count — see cake.
 // weightInPounds in the order-detail payload). Neither present -> em dash.
@@ -142,6 +152,17 @@ function formatOrderQuantity(quantity: number | null, weightInPounds: number | n
   if (quantity !== null) return `${quantity} ${quantity === 1 ? 'pc' : 'pcs'}`;
   if (weightInPounds !== null) return `${weightInPounds} lb`;
   return '—';
+}
+
+// "2026-09" -> "Sept 26" — matches the founder's reference image exactly,
+// including "Sept" (not the standard 3-letter "Sep") for September.
+const MONTH_PILL_ABBREVIATIONS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sept', 'Oct', 'Nov', 'Dec',
+];
+function formatMonthPillLabel(monthStr: string): string {
+  const [year, month] = monthStr.split('-').map(Number);
+  return `${MONTH_PILL_ABBREVIATIONS[month - 1]} ${String(year).slice(2)}`;
 }
 
 // "2026-03" -> "Mar '26" — compact enough for 6 side-by-side labels on a
@@ -320,6 +341,12 @@ interface RealCalendarData {
     delivered: number;
     estimatedTotal: number;
   };
+}
+
+// GET /api/dashboard/calendar/months — backs the month-picker strip.
+interface RealCalendarMonthOverview {
+  month: string; // YYYY-MM
+  totalOrders: number;
 }
 
 interface RealBillingStatus {
@@ -1426,6 +1453,12 @@ export default function Webapp() {
   // redesign spec, rather than jumping straight to today's orders.
   const orderListRef = useRef<HTMLDivElement | null>(null);
 
+  // Month-picker strip (GET /api/dashboard/calendar/months) — order counts
+  // for the 6-month window around calendarMonth, per the founder's
+  // reference image.
+  const [calendarMonthsOverview, setCalendarMonthsOverview] = useState<RealCalendarMonthOverview[]>([]);
+  const [calendarMonthsOverviewLoading, setCalendarMonthsOverviewLoading] = useState(false);
+
   // Bootstrap: the session lives in an httpOnly cookie the browser already
   // holds after a successful login, so on load we ask the backend whether
   // it's still valid rather than defaulting to the login screen every time.
@@ -2205,6 +2238,22 @@ export default function Webapp() {
       .finally(() => setCalendarMonthOrdersLoading(false));
   }, [step, activeTab, calendarMonth]);
 
+  // Month-picker strip data (GET /api/dashboard/calendar/months) — order
+  // counts for the 6-month window centered on calendarMonth. Silently
+  // ignored on failure (no error banner) since the strip is a navigation
+  // convenience, not the primary calendar data the two effects above load.
+  useEffect(() => {
+    if (step !== 'dashboard' || activeTab !== 'calendar') return;
+    setCalendarMonthsOverviewLoading(true);
+    api
+      .get<{ success: boolean; data: { months: RealCalendarMonthOverview[] } }>(
+        `/api/dashboard/calendar/months?month=${calendarMonth}`,
+      )
+      .then((res) => setCalendarMonthsOverview(res.data.months))
+      .catch(() => {})
+      .finally(() => setCalendarMonthsOverviewLoading(false));
+  }, [step, activeTab, calendarMonth]);
+
   // OTP Timer countdown
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -2539,12 +2588,22 @@ export default function Webapp() {
   const calendarDaysInMonth = new Date(calendarMonthYear, calendarMonthNum, 0).getDate();
   const calendarStartOffset = new Date(calendarMonthYear, calendarMonthNum - 1, 1).getDay();
 
-  const shiftCalendarMonth = (delta: number) => {
-    const d = new Date(calendarMonthYear, calendarMonthNum - 1 + delta, 1);
-    setCalendarMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  // Navigation now happens by tapping a pill in the month-picker strip
+  // (goToMonth) or the "Back to today" link (goToToday) — no prev/next
+  // arrows, per the founder's reference image. Both clear the selected
+  // date so the order-list header never shows a stale date from a month
+  // that's no longer in view.
+  const goToMonth = (monthStr: string) => {
+    setCalendarMonth(monthStr);
+    setSelectedCalendarDate(null);
   };
-  const handlePrevMonth = () => shiftCalendarMonth(-1);
-  const handleNextMonth = () => shiftCalendarMonth(1);
+  const goToToday = () => {
+    const t = new Date();
+    const todayStr = t.toISOString().slice(0, 10);
+    setCalendarMonth(`${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}`);
+    setSelectedCalendarDate(todayStr);
+    orderListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   // Groups the already-fetched whole-month order list by delivery date —
   // shared by the day-cell name badges (grid, below) and the selected-
@@ -3571,20 +3630,8 @@ export default function Webapp() {
                 <div className="w-full animate-fadeIn">
 
                   {/* Header Title */}
-                  <div className="mb-6 flex justify-between items-center">
+                  <div className="mb-6">
                     <h2 className="font-serif text-3xl md:text-4xl font-bold text-[var(--text-primary)]">Schedule</h2>
-                    <span
-                      onClick={() => {
-                        const t = new Date();
-                        const todayStr = t.toISOString().slice(0, 10);
-                        setCalendarMonth(`${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}`);
-                        setSelectedCalendarDate(todayStr);
-                        orderListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                      }}
-                      className="text-xs font-bold text-[var(--accent)] hover:underline cursor-pointer bg-[var(--surface)] py-1.5 px-3.5 rounded-full border border-[var(--border)] shadow-sm"
-                    >
-                      Today
-                    </span>
                   </div>
 
                   {calendarError && (
@@ -3596,36 +3643,19 @@ export default function Webapp() {
                   {/* Calendar Layout: stacked vertically for mobile view */}
                   <div className="flex flex-col gap-6 w-full">
 
-                    {/* Monthly calendar grid — day cells source their name
-                        badges from calendarOrdersByDate (the whole-month
+                    {/* Monthly calendar grid — day cells source their order
+                        chips from calendarOrdersByDate (the whole-month
                         GET /api/orders fetch, grouped by date), not from
                         GET /api/dashboard/calendar (which only carries
                         per-day aggregate counts). */}
                     <div className="bg-[var(--surface)] rounded-[28px] border border-[var(--border)] p-5 shadow-sm w-full flex flex-col items-center">
 
-                      {/* Month Swapping Header */}
-                      <div className="w-full flex flex-col items-center mb-6">
-                        <div className="w-full flex items-center justify-between px-1 mb-2">
-                          <button
-                            onClick={handlePrevMonth}
-                            className="p-2 rounded-[16px] bg-[var(--background)] hover:bg-neutral-100 dark:hover:bg-neutral-900 text-[var(--text-primary)] transition-all border border-[var(--border)] cursor-pointer"
-                          >
-                            <ArrowLeft size={16} />
-                          </button>
-
-                          <span className="text-base font-extrabold text-[var(--text-primary)] font-serif">
-                            {calendarMonthLabel}
-                          </span>
-
-                          <button
-                            onClick={handleNextMonth}
-                            className="p-2 rounded-[16px] bg-[var(--background)] hover:bg-neutral-100 text-[var(--text-primary)] transition-all border border-[var(--border)] cursor-pointer rotate-180"
-                          >
-                            <ArrowLeft size={16} />
-                          </button>
-                        </div>
-
-                        <div className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
+                      {/* Month title + stats + "back to today" */}
+                      <div className="w-full flex flex-col items-center mb-4 text-center">
+                        <span className="text-base font-extrabold text-[var(--text-primary)] font-serif">
+                          {calendarMonthLabel}
+                        </span>
+                        <div className="text-[11.5px] font-semibold text-[var(--text-secondary)] mt-1">
                           {calendarLoading ? (
                             <span>Loading…</span>
                           ) : (
@@ -3636,6 +3666,49 @@ export default function Webapp() {
                             </>
                           )}
                         </div>
+                        <span
+                          onClick={goToToday}
+                          className="text-[11px] font-bold text-[var(--accent)] hover:underline cursor-pointer mt-1"
+                        >
+                          Back to today
+                        </span>
+                      </div>
+
+                      {/* Month-picker strip — 6-month window (GET
+                          /api/dashboard/calendar/months), 1 month ahead of
+                          calendarMonth then calendarMonth then 4 behind,
+                          per the founder's reference image. Horizontally
+                          scrollable; tapping a pill re-centers the window
+                          on that month, so tapping the edge pill repeatedly
+                          walks further back/forward without needing
+                          separate prev/next arrows. */}
+                      <div className="w-full flex gap-2 overflow-x-auto no-scrollbar pb-4 mb-4 border-b border-[var(--border)]/60 -mx-1 px-1">
+                        {(calendarMonthsOverviewLoading && calendarMonthsOverview.length === 0
+                          ? Array.from({ length: 6 })
+                          : calendarMonthsOverview
+                        ).map((entry, idx) => {
+                          if (!entry) {
+                            return <div key={idx} className="h-[52px] w-[74px] shrink-0 bg-[var(--text-primary)]/8 rounded-2xl animate-pulse" />;
+                          }
+                          const overview = entry as RealCalendarMonthOverview;
+                          const isActive = overview.month === calendarMonth;
+                          return (
+                            <button
+                              key={overview.month}
+                              onClick={() => goToMonth(overview.month)}
+                              className={`shrink-0 flex flex-col items-center justify-center gap-0.5 rounded-2xl px-3.5 py-2 min-w-[74px] transition-all cursor-pointer ${
+                                isActive
+                                  ? 'bg-[var(--text-primary)] text-[var(--background)]'
+                                  : 'bg-[var(--background)] text-[var(--text-primary)] border border-[var(--border)] hover:border-[var(--accent)]/40'
+                              }`}
+                            >
+                              <span className="text-xs font-extrabold font-serif">{formatMonthPillLabel(overview.month)}</span>
+                              <span className={`text-[9.5px] font-semibold ${isActive ? 'text-[var(--background)]/70' : 'text-[var(--text-secondary)]'}`}>
+                                {overview.totalOrders} {overview.totalOrders === 1 ? 'order' : 'orders'}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
 
                       {/* Weekdays Headers */}
@@ -3644,7 +3717,7 @@ export default function Webapp() {
                       </div>
 
                       {/* Days Grid */}
-                      <div className="grid grid-cols-7 gap-y-2 gap-x-1.5 w-full">
+                      <div className="grid grid-cols-7 gap-1.5 w-full">
                         {/* Render offsets */}
                         {Array.from({ length: calendarStartOffset }).map((_, idx) => (
                           <div key={`offset-${idx}`} className="py-2.5"></div>
@@ -3657,7 +3730,7 @@ export default function Webapp() {
                           const isSelected = selectedCalendarDate === dateStr;
                           const isToday = dateStr === todayCalendarDateStr;
                           const dayOrders = calendarOrdersByDate[dateStr] ?? [];
-                          const visibleOrders = dayOrders.slice(0, 3);
+                          const visibleOrders = dayOrders.slice(0, 2);
                           const overflowCount = dayOrders.length - visibleOrders.length;
 
                           return (
@@ -3667,35 +3740,36 @@ export default function Webapp() {
                                 setSelectedCalendarDate(dateStr);
                                 orderListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                               }}
-                              className={`relative rounded-[14px] border p-1 flex flex-col items-center min-h-[44px] gap-0.5 cursor-pointer transition-all w-full ${
+                              className={`relative rounded-[14px] border p-1 flex flex-col items-start min-h-[52px] gap-0.5 cursor-pointer transition-all w-full ${
                                 isSelected
-                                  ? 'bg-[var(--accent)] border-[var(--accent)] shadow-sm'
+                                  ? 'border-[var(--accent)] border-2 bg-[var(--accent)]/8'
                                   : isToday
                                     ? 'border-[var(--accent)] border-2 bg-[var(--surface)]'
-                                    : 'bg-transparent border-transparent hover:border-[var(--border)]'
+                                    : 'bg-[var(--surface)] border-[var(--border)]/60 hover:border-[var(--accent)]/40'
                               }`}
                             >
                               <div className="w-full flex items-center justify-between px-0.5">
-                                <span className={`text-xs font-extrabold ${isSelected ? 'text-white' : 'text-[var(--text-primary)]'}`}>
+                                <span className={`text-xs font-extrabold ${isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}>
                                   {dayInt}
                                 </span>
-                                {isToday && !isSelected && (
+                                {isToday && (
                                   <span className="text-[6.5px] font-extrabold uppercase tracking-wide text-[var(--accent)]">Today</span>
                                 )}
                               </div>
 
                               {visibleOrders.map((o) => (
-                                <span
+                                <div
                                   key={o.orderId}
-                                  className="w-full text-[7.5px] leading-tight font-bold text-white px-1 py-0.5 rounded-[4px] truncate"
-                                  style={{ backgroundColor: ORDER_STATUS_COLORS[o.status] }}
-                                  title={o.customerName || 'Walk-in customer'}
+                                  className="w-full leading-tight px-1 py-0.5 rounded-[6px] truncate"
+                                  style={statusChipStyle(o.status)}
+                                  title={`${o.customerName || 'Walk-in customer'} — ${o.cakeCategory}`}
                                 >
-                                  {o.customerName || 'Walk-in'}
-                                </span>
+                                  <div className="text-[8px] font-bold truncate">{o.customerName || 'Walk-in'}</div>
+                                  <div className="text-[7px] font-medium opacity-80 truncate">{o.cakeCategory}</div>
+                                </div>
                               ))}
                               {overflowCount > 0 && (
-                                <span className={`text-[7.5px] font-bold ${isSelected ? 'text-white/90' : 'text-[var(--text-secondary)]'}`}>
+                                <span className="text-[7.5px] font-bold text-[var(--text-secondary)]">
                                   +{overflowCount} more
                                 </span>
                               )}
