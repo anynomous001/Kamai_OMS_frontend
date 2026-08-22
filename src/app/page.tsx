@@ -4,14 +4,15 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Home as HomeIcon, ClipboardList, Users, Calendar as CalendarIcon,
-  ShoppingBag, MoreHorizontal, Moon, Sun, ArrowUpRight, Plus,
+  ShoppingBag, MoreHorizontal, Moon, Sun, Plus,
   Search, Bell, Check, X, Shield, Phone, MessageSquare,
   ChevronRight, Sparkles, AlertCircle, FileText, CheckCircle2,
   LogOut, ChevronDown, Percent, CreditCard, Send, Mail,
   Settings as SettingsIcon, ShieldCheck, Heart, Info, Wallet,
   UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy,
   Share2, Download, Store, Truck, Clock,
-  ArrowUpDown, ShoppingCart, Minus, MapPin, RotateCcw, TrendingUp
+  ArrowUpDown, ShoppingCart, Minus, MapPin, RotateCcw,
+  IndianRupee, PiggyBank
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -57,10 +58,6 @@ interface DashboardUpcomingOrder {
 }
 
 interface DashboardSummary {
-  todayDeliveries: number;
-  activeOrders: number;
-  outstandingBalance: number;
-  totalRevenue: number;
   todayOrders: DashboardTodayOrder[];
   // Optional: absent if the backend serving this response predates the
   // Upcoming Lookahead feature (e.g. a stale dev server not yet restarted
@@ -69,18 +66,23 @@ interface DashboardSummary {
     month: string | null;
     orders: DashboardUpcomingOrder[];
   };
+  // Dashboard-redesign 4-card metric grid (replaces the old
+  // todayDeliveries/activeOrders/outstandingBalance/totalRevenue fields and
+  // the monthlyFinancials block, both retired along with the UI they fed).
   // Optional for the same stale-backend reason as upcomingOrders above.
-  // expectedToBeSoldThisMonth is deliberately not surfaced in its own card
-  // - it's the same non-cancelled/deliveryDate-this-month definition the
-  // existing "This Month's Revenue" card already shows (sourced from
-  // GET /api/analytics/summary?months=1), so a second card would just be
-  // the same number twice.
-  monthlyFinancials?: {
-    deliveredThisMonth: number;
-    amountSoldThisMonth: number;
-    expectedToBeSoldThisMonth: number;
-    dueThisMonth: number;
-    advanceCollectedThisMonth: number;
+  metrics?: {
+    totalOrdersThisMonth: number;
+    confirmedOrdersCount: number;
+    pendingOrdersCount: number;
+
+    expectedRevenueThisMonth: number;
+    confirmedRevenue: number;
+    deliveredRevenue: number;
+    confirmedBalanceDue: number;
+
+    pendingOrderValue: number;
+
+    totalInvestedThisMonth: number;
   };
 }
 
@@ -409,14 +411,6 @@ export default function Webapp() {
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
-
-  // This month's revenue/profit — reuses GET /api/analytics/summary?months=1
-  // (the Finance Analytics endpoint) rather than adding a second, separately
-  // -computed "current month" figure on the dashboard endpoint itself, so
-  // this can never drift from what the Analytics section's own trend chart
-  // shows for the current month.
-  const [dashboardMonthSummary, setDashboardMonthSummary] = useState<{ revenue: number; profit: number } | null>(null);
-  const [dashboardMonthLoading, setDashboardMonthLoading] = useState(false);
 
   // Email login fields
   const [email, setEmail] = useState('');
@@ -930,7 +924,6 @@ export default function Webapp() {
       // openOrderDetail re-fetches the full detail (the PUT response only
       // returns a partial shape) and re-opens the sheet with fresh data.
       fetchDashboardSummary();
-      fetchDashboardMonthSummary();
       fetchOrdersList();
       openOrderDetail(editOrderNumber);
     } catch (err: any) {
@@ -1492,26 +1485,6 @@ export default function Webapp() {
       fetchDashboardSummary();
     }
   }, [step, fetchDashboardSummary]);
-
-  // Only needed on the Home tab (where the KPI cards render), so scoped
-  // tighter than fetchDashboardSummary above rather than fetched on every
-  // app entry regardless of which tab is actually open.
-  const fetchDashboardMonthSummary = useCallback(() => {
-    setDashboardMonthLoading(true);
-    api
-      .get<{ success: boolean; data: { months: { revenue: number; profit: number }[] } }>(
-        '/api/analytics/summary?months=1',
-      )
-      .then((res) => setDashboardMonthSummary(res.data.months[0] ?? { revenue: 0, profit: 0 }))
-      .catch(() => setDashboardMonthSummary(null))
-      .finally(() => setDashboardMonthLoading(false));
-  }, []);
-
-  useEffect(() => {
-    if (step === 'dashboard' && activeTab === 'home') {
-      fetchDashboardMonthSummary();
-    }
-  }, [step, activeTab, fetchDashboardMonthSummary]);
 
   // Fetch real orders list. Extracted as a stable callback (not just inline
   // in the effect below) so it can also be called directly right after
@@ -2462,7 +2435,6 @@ export default function Webapp() {
       // Dashboard (and Orders, if that's the tab the sheet was opened
       // from) won't re-run their effects just because a sheet closed.
       fetchDashboardSummary();
-      fetchDashboardMonthSummary();
       fetchOrdersList();
     } catch (err: any) {
       setNewOrderError(err.message || 'Failed to create order.');
@@ -2961,143 +2933,90 @@ export default function Webapp() {
                   {/* Dashboard Responsive Grid */}
                   <div className="flex flex-col gap-4 mb-8">
 
-                    {/* KPI Cards section */}
+                    {/* Dashboard-redesign 4-metric grid — real GET
+                        /api/dashboard/summary's metrics block. Replaces the
+                        old 4 KPI cards + "This Month, In Detail" section. */}
                     <div className="grid grid-cols-2 gap-4">
 
-                      {/* To Collect Card */}
+                      {/* Card 1: Total Orders This Month */}
                       <div
-                        onClick={() => setActiveSheet('manage-upi')}
+                        onClick={() => setActiveTab('orders')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
                         <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>To Collect</span>
-                          <AlertCircle size={16} className="text-[var(--accent)]" />
+                          <span>Total Orders This Month</span>
+                          <ClipboardList size={16} className="text-[var(--accent)]" />
                         </div>
                         <div className="mt-4">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
-                            <span className="text-3xl font-extrabold tracking-tight">₹{(dashboardSummary?.outstandingBalance ?? 0).toLocaleString('en-IN')}</span>
+                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">{dashboardSummary?.metrics?.totalOrdersThisMonth ?? 0}</span>
                           )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">Outstanding balance to recover</p>
+                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">
+                            {dashboardSummary?.metrics?.confirmedOrdersCount ?? 0} Confirmed · {dashboardSummary?.metrics?.pendingOrdersCount ?? 0} Pending
+                          </p>
                         </div>
                       </div>
 
-                      {/* Deliveries Today Card */}
+                      {/* Card 2: Expected This Month */}
                       <div
-                        onClick={() => setActiveTab('calendar')}
+                        onClick={() => setActiveTab('orders')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
                         <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Deliveries Today</span>
-                          <ShoppingBag size={16} className="text-[var(--accent)]" />
+                          <span>Expected This Month</span>
+                          <IndianRupee size={16} className="text-[var(--accent)]" />
                         </div>
                         <div className="mt-4">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
-                            <span className="text-3xl font-extrabold tracking-tight">{dashboardSummary?.todayDeliveries ?? 0} Orders</span>
+                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">₹{(dashboardSummary?.metrics?.expectedRevenueThisMonth ?? 0).toLocaleString('en-IN')}</span>
                           )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">Scheduled for delivery today</p>
+                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">
+                            ₹{(dashboardSummary?.metrics?.confirmedRevenue ?? 0).toLocaleString('en-IN')} Confirmed · ₹{(dashboardSummary?.metrics?.deliveredRevenue ?? 0).toLocaleString('en-IN')} Delivered · ₹{(dashboardSummary?.metrics?.confirmedBalanceDue ?? 0).toLocaleString('en-IN')} Due
+                          </p>
                         </div>
                       </div>
 
-                      {/* This Month's Revenue Card — real GET
-                          /api/analytics/summary?months=1, same figure the
-                          Finance Analytics trend chart shows for the
-                          current month. */}
+                      {/* Card 3: Pending Order Value */}
+                      <div
+                        onClick={() => setActiveTab('orders')}
+                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                      >
+                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
+                          <span>Pending Order Value</span>
+                          <Clock size={16} className="text-[var(--accent)]" />
+                        </div>
+                        <div className="mt-4">
+                          {dashboardLoading ? (
+                            <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
+                          ) : (
+                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">₹{(dashboardSummary?.metrics?.pendingOrderValue ?? 0).toLocaleString('en-IN')}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Card 4: Invested This Month */}
                       <div
                         onClick={() => setActiveTab('expenses')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
                         <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>This Month&apos;s Revenue</span>
-                          <ArrowUpRight size={16} className="text-[var(--accent)]" />
+                          <span>Invested This Month</span>
+                          <PiggyBank size={16} className="text-[var(--accent)]" />
                         </div>
                         <div className="mt-4">
-                          {dashboardMonthLoading ? (
+                          {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
-                            <span className="text-3xl font-extrabold tracking-tight">₹{(dashboardMonthSummary?.revenue ?? 0).toLocaleString('en-IN')}</span>
+                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">₹{(dashboardSummary?.metrics?.totalInvestedThisMonth ?? 0).toLocaleString('en-IN')}</span>
                           )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">From non-cancelled orders this month</p>
-                        </div>
-                      </div>
-
-                      {/* This Month's Profit Card — same endpoint, revenue
-                          minus logged expenses for the current month. */}
-                      <div
-                        onClick={() => setActiveTab('expenses')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
-                      >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>This Month&apos;s Profit</span>
-                          <TrendingUp size={16} className="text-[var(--accent)]" />
-                        </div>
-                        <div className="mt-4">
-                          {dashboardMonthLoading ? (
-                            <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
-                          ) : (
-                            <span className={`text-3xl font-extrabold tracking-tight ${(dashboardMonthSummary?.profit ?? 0) < 0 ? 'text-red-600 dark:text-red-400' : ''}`}>
-                              ₹{(dashboardMonthSummary?.profit ?? 0).toLocaleString('en-IN')}
-                            </span>
-                          )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">Revenue minus expenses this month</p>
                         </div>
                       </div>
 
                     </div>
-
-                    {/* This Month, In Detail — GET /api/dashboard/summary's
-                        monthlyFinancials block. Kept as its own labeled
-                        section rather than mixed into the KPI grid above,
-                        matching the backend's own design intent: the KPI
-                        grid is a fast daily glance, this is a reporting
-                        surface. expectedToBeSoldThisMonth isn't repeated
-                        here - see the DashboardSummary type comment. */}
-                    {dashboardSummary?.monthlyFinancials && (
-                      <div className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm">
-                        <h3 className="font-serif text-lg font-semibold text-[var(--text-primary)] mb-4">This Month, In Detail</h3>
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="flex items-start gap-3">
-                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
-                              <Truck size={16} className="text-[var(--accent)]" />
-                            </div>
-                            <div>
-                              <span className="block text-xl font-extrabold tracking-tight">{dashboardSummary.monthlyFinancials.deliveredThisMonth}</span>
-                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Orders delivered this month</p>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
-                              <CheckCircle2 size={16} className="text-[var(--accent)]" />
-                            </div>
-                            <div>
-                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.amountSoldThisMonth.toLocaleString('en-IN')}</span>
-                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Sold from delivered orders</p>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
-                              <Clock size={16} className="text-[var(--accent)]" />
-                            </div>
-                            <div>
-                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.dueThisMonth.toLocaleString('en-IN')}</span>
-                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Still due this month</p>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <div className="w-9 h-9 rounded-full bg-[var(--accent)]/10 flex items-center justify-center flex-shrink-0">
-                              <Wallet size={16} className="text-[var(--accent)]" />
-                            </div>
-                            <div>
-                              <span className="block text-xl font-extrabold tracking-tight">₹{dashboardSummary.monthlyFinancials.advanceCollectedThisMonth.toLocaleString('en-IN')}</span>
-                              <p className="text-[10px] text-[var(--text-secondary)] font-medium">Cash collected this month</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
 
                     {dashboardError && (
                       <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
