@@ -39,7 +39,7 @@ interface DashboardTodayOrder {
   bakerId: string;
   orderNumber: string;
   deliveryDate: string;
-  status: string;
+  status: RealOrderStatus;
   totalPrice: number;
   balanceDue: number;
   createdAt: string;
@@ -53,7 +53,7 @@ interface DashboardUpcomingOrder {
   cakeCategory: string;
   deliveryDate: string;
   deliveryTime: string | null;
-  status: string;
+  status: RealOrderStatus;
   totalPrice: number;
   balanceDue: number;
 }
@@ -91,7 +91,20 @@ interface DashboardSummary {
 // Delivered/Cancelled) — distinct from the mock Order['status'] type still
 // used elsewhere until those screens are wired.
 type RealOrderStatus = 'Pending' | 'Confirmed' | 'In Progress' | 'Ready' | 'Delivered' | 'Cancelled';
-type RealOrderTab = 'All' | RealOrderStatus;
+const ALL_ORDER_STATUSES: RealOrderStatus[] = ['Pending', 'Confirmed', 'In Progress', 'Ready', 'Delivered', 'Cancelled'];
+
+// Orders-list quick-filter chips — distinct from RealOrderStatus because two
+// of these ('DeliveredThisMonth', 'Recent') aren't a single status value,
+// they carry their own param combinations (see fetchOrdersList).
+type OrderFilterChip = 'All' | 'Pending' | 'Confirmed' | 'Cancelled' | 'DeliveredThisMonth' | 'Recent';
+const ORDER_FILTER_CHIPS: { id: OrderFilterChip; label: string }[] = [
+  { id: 'All', label: 'All' },
+  { id: 'Pending', label: 'Pending' },
+  { id: 'Confirmed', label: 'Confirmed' },
+  { id: 'Cancelled', label: 'Cancelled' },
+  { id: 'DeliveredThisMonth', label: 'Delivered This Month' },
+  { id: 'Recent', label: 'Recent' },
+];
 
 interface RealOrderListItem {
   orderId: string;
@@ -123,18 +136,17 @@ function derivePaymentStatus(totalPrice: number, balanceDue: number): PaymentSta
   return 'Partially Paid';
 }
 
-// Calendar redesign: orderStatus color palette for day-cell order chips and
-// order-card status pills. Founder's spec defined 4 colors (Confirmed/
-// Pending/Paid/Cancelled) but orderStatus actually has 6 values — 'Paid'
-// isn't a real orderStatus (that's paymentStatus, handled separately via
-// derivePaymentStatus above). Kept the 4 given colors for their matching
-// statuses and added 2 more (In Progress, Ready) to cover the full enum.
+// orderStatus color palette — shared by day-cell order chips, order-card
+// status pills, the orders-list badge, and the interactive status selector
+// on Order Detail, so all four stay visually consistent. Updated for the
+// Aug 2026 status-editing spec (Confirmed=blue, In Progress=brand orange
+// #EA580C, Ready=purple, Delivered=green); Pending/Cancelled unchanged.
 const ORDER_STATUS_COLORS: Record<RealOrderStatus, string> = {
   Pending: '#FFC107',
-  Confirmed: '#4CAF50',
-  'In Progress': '#8B5CF6',
-  Ready: '#0D9488',
-  Delivered: '#2196F3',
+  Confirmed: '#2196F3',
+  'In Progress': '#EA580C',
+  Ready: '#8B5CF6',
+  Delivered: '#4CAF50',
   Cancelled: '#9E9E9E',
 };
 
@@ -402,6 +414,95 @@ const initialExpenses: Expense[] = [
   { id: 'E-5', item: 'Sprinkles & Decorations', amount: 220, date: 'Oct 20, 2023', category: 'Decoration' }
 ];
 
+// Shared order card — originally the calendar date-drill-down card, now also
+// used by the Dashboard's Upcoming section (see Fix 4) so both surfaces show
+// the same order info in the same layout. cakeFlavour isn't included: it
+// isn't present on either GET /api/orders (calendar) or GET
+// /api/dashboard/summary (dashboard upcomingOrders) list responses, only on
+// the single order-detail endpoint. advancePaid/onRemind/reminding are
+// optional since the calendar's month-orders data doesn't carry an advance
+// amount or a reminder affordance the way the dashboard's does.
+interface OrderCardData {
+  orderNumber: string;
+  customerName: string | null;
+  cakeCategory: string;
+  quantity?: number | null;
+  weightInPounds?: number | null;
+  deliveryDate?: string | null;
+  deliveryTime?: string | null;
+  status: RealOrderStatus;
+  advancePaid?: number | null;
+  balanceDue: number;
+}
+
+function OrderCard({
+  order,
+  onClick,
+  onRemind,
+  reminding,
+}: {
+  order: OrderCardData;
+  onClick: () => void;
+  onRemind?: () => void;
+  reminding?: boolean;
+}) {
+  return (
+    <div
+      className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex flex-col gap-3 hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+      onClick={onClick}
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-bold text-[var(--accent)]">{order.orderNumber}</span>
+        <div className="flex items-center gap-2">
+          <span
+            className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
+            style={{ backgroundColor: ORDER_STATUS_COLORS[order.status] }}
+          >
+            {order.status}
+          </span>
+          <ChevronRight size={14} className="text-[var(--text-secondary)]" />
+        </div>
+      </div>
+
+      <div>
+        <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{order.customerName || 'Walk-in customer'}</h4>
+        <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+          {order.cakeCategory}
+          {(order.quantity || order.weightInPounds) ? ` • ${formatOrderQuantity(order.quantity ?? null, order.weightInPounds ?? null)}` : ''}
+        </p>
+        {order.deliveryDate && (
+          <p className="text-[10.5px] text-[var(--text-secondary)] mt-1">
+            {new Date(`${order.deliveryDate}T00:00:00`).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+            {order.deliveryTime ? ` • ${order.deliveryTime}` : ''}
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 pt-2 border-t border-[var(--border)]/60 flex-wrap">
+        {order.advancePaid != null && (
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${order.advancePaid > 0 ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100' : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-500 dark:text-neutral-400 border-[var(--border)]'}`}>
+            Advance ₹{order.advancePaid.toLocaleString('en-IN')}
+          </span>
+        )}
+        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]">
+          Balance ₹{order.balanceDue.toLocaleString('en-IN')}
+        </span>
+        {onRemind && order.balanceDue > 0 && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onRemind(); }}
+            disabled={reminding}
+            className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+          >
+            <Send size={11} />
+            {reminding ? 'Sending…' : 'Remind'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Webapp() {
   // --- BASE APP STATE ---
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -477,6 +578,27 @@ export default function Webapp() {
   const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
   const [receiptShareSent, setReceiptShareSent] = useState(false);
   const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; whatsappUrl: string } | null>(null);
+  // A fast double-tap on either button fires two click events before React
+  // re-renders to disable/hide it — state alone doesn't close that window
+  // since setState is batched/async, so both taps would still see the old
+  // (non-null / not-yet-loading) values and run twice, e.g. downloading the
+  // receipt image twice and opening WhatsApp twice. Refs mutate
+  // synchronously, so checking-and-setting one at the top of each handler
+  // closes the window a state check can't.
+  //
+  // receiptShareInFlightRef guards prepareReceiptShare, which is async, so
+  // resetting it once that call settles (success or error) is correct and
+  // lets the next legitimate prepare through.
+  //
+  // confirmReceiptShare has no awaits at all — its whole body, including
+  // any reset of a flag, would finish before a second synchronous click
+  // even starts, so a reset-at-the-end guard can never actually block
+  // anything. receiptShareConfirmedRef is deliberately never reset inside
+  // confirmReceiptShare itself; it's only cleared when a fresh payload is
+  // prepared, so it stays locked for the rest of this payload's lifetime
+  // once consumed.
+  const receiptShareInFlightRef = useRef(false);
+  const receiptShareConfirmedRef = useRef(false);
 
   const openCustomerProfile = useCallback((customerId: string) => {
     setSelectedOrderDetail(null);
@@ -581,6 +703,8 @@ export default function Webapp() {
 
   const prepareReceiptShare = useCallback(async (order: { id: string; orderId: string }) => {
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    if (receiptShareInFlightRef.current) return;
+    receiptShareInFlightRef.current = true;
     setReceiptShareError(null);
     setReceiptShareSent(false);
     setReceiptSharePayload(null);
@@ -605,6 +729,7 @@ export default function Webapp() {
       // on receiptSharePayload above. Stash the prepared file/link; the
       // "Tap to Send via WhatsApp" button's own click handler fires both
       // synchronously with no awaits before it.
+      receiptShareConfirmedRef.current = false;
       setReceiptSharePayload({ file, whatsappUrl: notifRes.data.whatsappUrl });
     } catch (err: any) {
       if (err?.errorCode === 'WHATSAPP_RECEIPT_DISABLED') {
@@ -614,6 +739,7 @@ export default function Webapp() {
       }
     } finally {
       setReceiptSharing(false);
+      receiptShareInFlightRef.current = false;
     }
     // isPaywalled deliberately included: without it this callback would
     // freeze the read-only check at whatever isPaywalled was on first
@@ -621,7 +747,8 @@ export default function Webapp() {
   }, [isPaywalled]);
 
   const confirmReceiptShare = useCallback(() => {
-    if (!receiptSharePayload) return;
+    if (!receiptSharePayload || receiptShareConfirmedRef.current) return;
+    receiptShareConfirmedRef.current = true;
     const { file, whatsappUrl } = receiptSharePayload;
     const downloadUrl = URL.createObjectURL(file);
     const a = document.createElement('a');
@@ -634,6 +761,8 @@ export default function Webapp() {
     window.open(whatsappUrl, '_blank');
     setReceiptShareSent(true);
     setReceiptSharePayload(null);
+    // Deliberately not resetting receiptShareConfirmedRef here — see the
+    // comment on it above.
   }, [receiptSharePayload]);
 
   // Payment-reminder quick action (POST /api/notifications/whatsapp,
@@ -785,6 +914,59 @@ export default function Webapp() {
   const [recordPaymentDirectAmount, setRecordPaymentDirectAmount] = useState('');
   const [recordPaymentSubmitting, setRecordPaymentSubmitting] = useState(false);
   const [recordPaymentError, setRecordPaymentError] = useState<string | null>(null);
+
+  // Order status editing (Order Detail screen) — PATCH /api/orders/:id/status.
+  // pendingStatusConfirm gates the one status transition (-> Delivered with
+  // balanceDue > 0) that needs an explicit confirm before firing the PATCH;
+  // every other transition applies immediately (optimistic update + revert
+  // on error). actionToast is a small shared success/error banner, separate
+  // from the read-only-blocked toast above since the two are never shown
+  // for the same reason.
+  const [statusUpdateSubmitting, setStatusUpdateSubmitting] = useState(false);
+  const [pendingStatusConfirm, setPendingStatusConfirm] = useState<{ orderNumber: string; newStatus: RealOrderStatus; balanceDue: number } | null>(null);
+  const [actionToast, setActionToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const showActionToast = (type: 'success' | 'error', message: string) => {
+    setActionToast({ type, message });
+    window.setTimeout(() => setActionToast(null), 4000);
+  };
+
+  const applyOrderStatusChange = async (orderNumber: string, newStatus: RealOrderStatus, previousStatus: RealOrderStatus) => {
+    setSelectedOrderDetail((prev: any) => (prev && prev.orderId === orderNumber ? { ...prev, status: newStatus } : prev));
+    setStatusUpdateSubmitting(true);
+    try {
+      await api.patch(`/api/orders/${orderNumber}/status`, { status: newStatus });
+      showActionToast('success', 'Status updated');
+      fetchOrdersList();
+      fetchDashboardSummary();
+    } catch (err: any) {
+      setSelectedOrderDetail((prev: any) => (prev && prev.orderId === orderNumber ? { ...prev, status: previousStatus } : prev));
+      showActionToast('error', err.message || 'Failed to update status.');
+    } finally {
+      setStatusUpdateSubmitting(false);
+    }
+  };
+
+  const handleStatusSelect = (newStatus: RealOrderStatus) => {
+    if (!selectedOrderDetail || newStatus === selectedOrderDetail.status || statusUpdateSubmitting) return;
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    const orderNumber = selectedOrderDetail.orderId;
+    const previousStatus = selectedOrderDetail.status as RealOrderStatus;
+    const balanceDue = selectedOrderDetail.payment.balanceDue as number;
+    if (newStatus === 'Delivered' && balanceDue > 0) {
+      setPendingStatusConfirm({ orderNumber, newStatus, balanceDue });
+      return;
+    }
+    applyOrderStatusChange(orderNumber, newStatus, previousStatus);
+  };
+
+  const confirmPendingStatusChange = () => {
+    if (!pendingStatusConfirm) return;
+    const { orderNumber, newStatus } = pendingStatusConfirm;
+    const previousStatus = selectedOrderDetail?.orderId === orderNumber ? (selectedOrderDetail.status as RealOrderStatus) : 'Ready';
+    setPendingStatusConfirm(null);
+    applyOrderStatusChange(orderNumber, newStatus, previousStatus);
+  };
 
   const openEditOrder = useCallback(() => {
     const d = selectedOrderDetail;
@@ -991,7 +1173,7 @@ export default function Webapp() {
   // Real profile edit form (PATCH /api/baker/profile) — owner name, phone,
   // and default advance percentage. Profile picture goes through the
   // separate existing upload flow (POST /api/uploads/signed-url + confirm).
-  const [editProfileForm, setEditProfileForm] = useState({ ownerName: '', phone: '', defaultAdvancePercentage: '' });
+  const [editProfileForm, setEditProfileForm] = useState({ businessName: '', ownerName: '', phone: '', defaultAdvancePercentage: '' });
   const [editProfileSubmitting, setEditProfileSubmitting] = useState(false);
   const [editProfileError, setEditProfileError] = useState<string | null>(null);
   const [editProfileSuccess, setEditProfileSuccess] = useState(false);
@@ -1049,7 +1231,7 @@ export default function Webapp() {
 
   // Search and filters
   const [orderSearch, setOrderSearch] = useState('');
-  const [orderTab, setOrderTab] = useState<RealOrderTab>('All');
+  const [orderTab, setOrderTab] = useState<OrderFilterChip>('All');
   const [ordersList, setOrdersList] = useState<RealOrderListItem[]>([]);
   const [ordersPagination, setOrdersPagination] = useState<OrdersPagination | null>(null);
   const [ordersPage, setOrdersPage] = useState(1);
@@ -1489,7 +1671,24 @@ export default function Webapp() {
     const params = new URLSearchParams();
     params.set('page', String(ordersPage));
     params.set('limit', '10');
-    if (orderTab !== 'All') params.set('status', orderTab);
+    // Most-recent-first is the default for every chip, including 'All' —
+    // matches the from/to + sort/order param shape GET /api/orders already
+    // uses for the calendar month fetch (see fetchCalendarMonthOrders)
+    // rather than guessing a different convention for this call.
+    params.set('sort', 'createdAt');
+    params.set('order', 'desc');
+
+    if (orderTab === 'Pending' || orderTab === 'Confirmed' || orderTab === 'Cancelled') {
+      params.set('status', orderTab);
+    } else if (orderTab === 'DeliveredThisMonth') {
+      params.set('status', 'Delivered');
+      const now = new Date();
+      params.set('from', `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`);
+      params.set('to', now.toISOString().slice(0, 10));
+    }
+    // 'All' and 'Recent' both send no status filter — 'Recent' just makes
+    // the already-default sort=createdAt&order=desc explicit per spec.
+
     if (orderSearch.trim()) params.set('search', orderSearch.trim());
 
     api
@@ -2053,6 +2252,7 @@ export default function Webapp() {
           generateDynamicQR: res.data.payment.dynamicQrEnabled,
         });
         setEditProfileForm({
+          businessName: res.data.business.businessName || '',
           ownerName: res.data.business.ownerName || '',
           phone: res.data.business.phone || '',
           defaultAdvancePercentage:
@@ -2089,11 +2289,16 @@ export default function Webapp() {
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    const trimmedBusinessName = editProfileForm.businessName.trim();
+    if (!trimmedBusinessName) {
+      setEditProfileError('Bakery / business name is required.');
+      return;
+    }
     setEditProfileSubmitting(true);
     setEditProfileError(null);
     setEditProfileSuccess(false);
     try {
-      const body: Record<string, unknown> = {};
+      const body: Record<string, unknown> = { businessName: trimmedBusinessName };
       if (editProfileForm.ownerName.trim()) body.ownerName = editProfileForm.ownerName.trim();
       if (editProfileForm.phone.trim()) body.phone = editProfileForm.phone.trim();
       if (editProfileForm.defaultAdvancePercentage !== '') {
@@ -2101,15 +2306,25 @@ export default function Webapp() {
       }
       const res = await api.patch<{
         success: boolean;
-        data: { ownerName: string | null; phone: string | null; defaultAdvancePercentage: number | null; updatedAt: string };
+        data: { businessName?: string | null; ownerName: string | null; phone: string | null; defaultAdvancePercentage: number | null; updatedAt: string };
       }>('/api/baker/profile', body);
       // Update the already-loaded profile in place from the save response
-      // — no refetch, so no loading flash and no lost scroll position.
+      // — no refetch, so no loading flash and no lost scroll position. Every
+      // other read of business.businessName in the app (header greeting,
+      // profile avatar initial, etc.) reads off this same bakerProfile
+      // state, so updating it here is what propagates the new name
+      // app-wide. Falls back to the submitted value if the backend
+      // response doesn't echo businessName back.
       setBakerProfile((prev) =>
         prev
           ? {
               ...prev,
-              business: { ...prev.business, ownerName: res.data.ownerName, phone: res.data.phone || prev.business.phone },
+              business: {
+                ...prev.business,
+                businessName: res.data.businessName ?? trimmedBusinessName,
+                ownerName: res.data.ownerName,
+                phone: res.data.phone || prev.business.phone,
+              },
               payment: { ...prev.payment, defaultAdvancePercentage: res.data.defaultAdvancePercentage },
             }
           : prev,
@@ -2535,7 +2750,7 @@ export default function Webapp() {
     { id: 'settings', label: 'Settings', icon: SettingsIcon },
   ] as const;
 
-  const orderTabs: RealOrderTab[] = ['All', 'Pending', 'Confirmed', 'In Progress', 'Ready', 'Delivered', 'Cancelled'];
+  const orderTabs = ORDER_FILTER_CHIPS;
   const expenseCategories = REAL_INVESTMENT_CATEGORIES;
 
   // Derived, real calendar-month bookkeeping (replacing the mock's fixed
@@ -2859,6 +3074,24 @@ export default function Webapp() {
               </div>
             )}
 
+            {/* Generic action toast (status update, etc.) — auto-dismisses
+                via showActionToast's own timeout, plus a manual close. */}
+            {actionToast && (
+              <div className={`fixed bottom-24 left-1/2 -translate-x-1/2 z-[110] w-[calc(100%-2rem)] max-w-[440px] rounded-2xl shadow-2xl px-4 py-3.5 flex items-center gap-3 ${actionToast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
+                }`}>
+                <span className="text-lg flex-shrink-0">{actionToast.type === 'success' ? '✅' : '⚠️'}</span>
+                <p className="flex-1 min-w-0 text-[11.5px] font-medium leading-snug">{actionToast.message}</p>
+                <button
+                  type="button"
+                  onClick={() => setActionToast(null)}
+                  aria-label="Dismiss"
+                  className="flex-shrink-0 cursor-pointer opacity-80 hover:opacity-100"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            )}
+
             {/* --- MOBILE NAVIGATION BAR & HEADER --- */}
             <div className="w-full flex items-center justify-between px-6 py-3 border-b border-[var(--border)] bg-[var(--background)] sticky top-0 z-30">
               <div className="flex items-center select-none">
@@ -3152,58 +3385,28 @@ export default function Webapp() {
                         </span>
                       </div>
 
+                      {/* Reuses OrderCard — the same component the Calendar
+                          date drill-down uses (see Fix 4) — instead of a
+                          separate, simpler card design. The reminder
+                          affordance rides along via OrderCard's optional
+                          onRemind/reminding props, which the calendar's own
+                          usage of this component leaves unset. */}
                       <div className="flex flex-col gap-4">
-                        {dashboardSummary.upcomingOrders.orders.map((o) => {
-                          const paymentStatus = derivePaymentStatus(o.totalPrice, o.balanceDue);
-                          return (
-                            <div key={o.id} className="flex flex-col gap-2">
-                              <div
-                                className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
-                                onClick={() => openOrderDetail(o.orderNumber)}
-                              >
-                                <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
-                                  🎂
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.customerName || 'Walk-in customer'} — {o.cakeCategory}</h4>
-                                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
-                                    {new Date(`${o.deliveryDate}T00:00:00`).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
-                                    {o.deliveryTime ? ` • ${o.deliveryTime}` : ''} • <span className="text-[var(--accent)] font-semibold">{o.status}</span>
-                                  </p>
-                                </div>
-                                <div className="flex-shrink-0 flex flex-col items-end gap-1.5">
-                                  {paymentStatus === 'Paid' ? (
-                                    <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
-                                      Fully Paid
-                                    </span>
-                                  ) : (
-                                    <>
-                                      <span className={`text-[10px] font-bold px-2.5 py-1.5 rounded-full border whitespace-nowrap ${paymentStatus === 'Unpaid'
-                                        ? 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border-red-200/50'
-                                        : 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200/50'
-                                        }`}>
-                                        {paymentStatus} • ₹{o.balanceDue.toLocaleString('en-IN')}
-                                      </span>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); sendPaymentReminder(o.id); }}
-                                        disabled={sendingReminderId === o.id}
-                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
-                                      >
-                                        <Send size={11} />
-                                        {sendingReminderId === o.id ? 'Sending…' : 'Remind'}
-                                      </button>
-                                    </>
-                                  )}
-                                </div>
+                        {dashboardSummary.upcomingOrders.orders.map((o) => (
+                          <div key={o.id} className="flex flex-col gap-2">
+                            <OrderCard
+                              order={o}
+                              onClick={() => openOrderDetail(o.orderNumber)}
+                              onRemind={() => sendPaymentReminder(o.id)}
+                              reminding={sendingReminderId === o.id}
+                            />
+                            {reminderErrors[o.id] && (
+                              <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
+                                <AlertCircle size={12} /> {reminderErrors[o.id]}
                               </div>
-                              {reminderErrors[o.id] && (
-                                <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
-                                  <AlertCircle size={12} /> {reminderErrors[o.id]}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
+                            )}
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}
@@ -3249,18 +3452,22 @@ export default function Webapp() {
                       />
                     </div>
 
-                    {/* Horizontal Scrollable Tabs */}
+                    {/* Horizontal Scrollable Filter Chips — All/Pending/
+                        Confirmed/Cancelled/Delivered This Month/Recent (see
+                        ORDER_FILTER_CHIPS). sort=createdAt&order=desc is
+                        always applied in fetchOrdersList regardless of
+                        which chip is active. */}
                     <div className="flex gap-2 overflow-x-auto no-scrollbar py-1">
-                      {orderTabs.map((tabName) => (
+                      {orderTabs.map(({ id, label }) => (
                         <button
-                          key={tabName}
-                          onClick={() => setOrderTab(tabName)}
-                          className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${orderTab === tabName
+                          key={id}
+                          onClick={() => setOrderTab(id)}
+                          className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${orderTab === id
                             ? 'bg-[var(--accent)] text-white shadow-sm'
                             : 'bg-[var(--surface)] text-[var(--text-secondary)] border border-[var(--border)] hover:bg-neutral-50 dark:hover:bg-neutral-900'
                             }`}
                         >
-                          {tabName}
+                          {label}
                         </button>
                       ))}
                     </div>
@@ -3722,40 +3929,11 @@ export default function Webapp() {
                       )}
 
                       {!calendarMonthOrdersLoading && !calendarMonthOrdersError && selectedDateOrders.map((o) => (
-                        <div
+                        <OrderCard
                           key={o.orderId}
-                          className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex flex-col gap-3 hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                          order={o}
                           onClick={() => openOrderDetail(o.orderNumber)}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-[var(--accent)]">{o.orderNumber}</span>
-                            <div className="flex items-center gap-2">
-                              <span
-                                className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
-                                style={{ backgroundColor: ORDER_STATUS_COLORS[o.status] }}
-                              >
-                                {o.status}
-                              </span>
-                              <ChevronRight size={14} className="text-[var(--text-secondary)]" />
-                            </div>
-                          </div>
-
-                          <div>
-                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">{o.customerName || 'Walk-in customer'}</h4>
-                            <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                              {o.cakeCategory} • {formatOrderQuantity(o.quantity, o.weightInPounds)}
-                            </p>
-                          </div>
-
-                          <div className="flex items-center gap-2 pt-2 border-t border-[var(--border)]/60">
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${o.advancePaid > 0 ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100' : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-500 dark:text-neutral-400 border-[var(--border)]'}`}>
-                              Advance ₹{o.advancePaid.toLocaleString('en-IN')}
-                            </span>
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]">
-                              Balance ₹{o.balanceDue.toLocaleString('en-IN')}
-                            </span>
-                          </div>
-                        </div>
+                        />
                       ))}
                     </div>
 
@@ -4178,8 +4356,17 @@ export default function Webapp() {
                     </div>
                   </div>
 
-                  {/* Grid Split: Form on left, recent logs on right */}
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+                  {/* Grid Split: Form on left, recent logs on right.
+                      Deliberately grid-cols-1 at every width, not just
+                      lg:grid-cols-3 stripped to grid-cols-1 — the app shell
+                      (see the outer max-w-[480px] wrapper) caps rendered
+                      width at 480px regardless of the actual device/browser
+                      viewport, so a `lg:` breakpoint (1024px) still fires
+                      on a wide screen even though the visible content stays
+                      480px wide, squeezing a 3-column layout into a
+                      phone-width card. Matches the single-column layout
+                      that was already correct on narrow viewports. */}
+                  <div className="grid grid-cols-1 gap-6 items-start">
 
                     {/* Log form (Left Column) — real fields: quantity x
                         pricePerUnit (server computes totalCost), not a flat
@@ -4308,14 +4495,16 @@ export default function Webapp() {
                         </div>
                       )}
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Same fixed-shell-width reasoning as the grid
+                          above — always single column, not sm:grid-cols-2. */}
+                      <div className="grid grid-cols-1 gap-4">
                         {investmentsLoading &&
                           [0, 1, 2, 3].map((i) => (
                             <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
                           ))}
 
                         {!investmentsLoading && !investmentsError && investmentsList.length === 0 && (
-                          <p className="text-xs text-[var(--text-secondary)] text-center py-8 sm:col-span-2">No expenses logged yet.</p>
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-8">No expenses logged yet.</p>
                         )}
 
                         {!investmentsLoading &&
@@ -5137,11 +5326,38 @@ export default function Webapp() {
                         {!orderDetailLoading && !orderDetailError && selectedOrderDetail && (
                           <div className="flex flex-col gap-4 overflow-y-auto">
                             <div className="bg-[var(--background)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm">
-                              <div className="flex justify-between items-start mb-3">
+                              <div className="flex justify-between items-center mb-3">
                                 <span className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">{selectedOrderDetail.orderId}</span>
-                                <span className="text-[10.5px] font-bold px-3 py-1 rounded-full bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50">
-                                  {selectedOrderDetail.status}
-                                </span>
+                                {statusUpdateSubmitting && (
+                                  <span className="w-3.5 h-3.5 border-2 border-[var(--accent)]/30 border-t-[var(--accent)] rounded-full animate-spin" />
+                                )}
+                              </div>
+                              {/* Interactive status selector — segmented pills,
+                                  one per valid status. Tapping a different one
+                                  fires PATCH /api/orders/:id/status; Delivered
+                                  with balanceDue > 0 routes through a confirm
+                                  modal first (see pendingStatusConfirm). */}
+                              <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1 mb-3">
+                                {ALL_ORDER_STATUSES.map((s) => {
+                                  const isActive = selectedOrderDetail.status === s;
+                                  const color = ORDER_STATUS_COLORS[s];
+                                  return (
+                                    <button
+                                      key={s}
+                                      type="button"
+                                      disabled={statusUpdateSubmitting}
+                                      onClick={() => handleStatusSelect(s)}
+                                      className="shrink-0 text-[10.5px] font-bold px-3 py-1.5 rounded-full border transition-all disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                                      style={
+                                        isActive
+                                          ? { backgroundColor: color, color: '#fff', borderColor: color }
+                                          : { backgroundColor: `${color}14`, color, borderColor: `${color}40` }
+                                      }
+                                    >
+                                      {s}
+                                    </button>
+                                  );
+                                })}
                               </div>
                               <h4 className="font-serif font-bold text-xl">{selectedOrderDetail.cake.category} — {selectedOrderDetail.cake.flavour}</h4>
                               <p className="text-xs text-[var(--text-secondary)] mt-1">
@@ -5429,14 +5645,11 @@ export default function Webapp() {
                       </div>
                     )}
 
-                    {/* SHEET: PROFILE & LEGAL (real data, read-only) —
-                        renamed from "Edit Profile & Legal": there is no
-                        PUT endpoint for businessName/ownerName/fssaiNumber/
-                        whatsappReceiptEnabled, only for UPI settings. A save
-                        button here would silently do nothing real, so this
-                        is now a real-data viewer, not an editor. Flagging
-                        this clearly — if profile editing is expected to
-                        work, the backend needs a new endpoint first. */}
+                    {/* SHEET: PROFILE & LEGAL (real data) — businessName,
+                        ownerName, phone, and defaultAdvancePercentage are
+                        editable via PATCH /api/baker/profile; fssaiNumber
+                        and whatsappReceiptEnabled remain read-only display
+                        fields below (no editing endpoint for those yet). */}
                     {activeSheet === 'edit-profile' && (
                       <div className="flex-1 flex flex-col">
                         <div className="flex justify-between items-center mb-6">
@@ -5519,7 +5732,13 @@ export default function Webapp() {
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                 <div>
                                   <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Business / Bakery Name</label>
-                                  <div className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs">{bakerProfile.business.businessName || '—'}</div>
+                                  <input
+                                    type="text"
+                                    required
+                                    value={editProfileForm.businessName}
+                                    onChange={(e) => setEditProfileForm({ ...editProfileForm, businessName: e.target.value })}
+                                    className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                                  />
                                 </div>
                                 <div>
                                   <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Owner Full Name</label>
@@ -7405,6 +7624,47 @@ export default function Webapp() {
                       </div>
                     )}
 
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            {/* Mark-as-Delivered-with-balance-due confirm — a small
+                independent overlay so it can sit on top of the Order Detail
+                sheet without navigating away from it. */}
+            <AnimatePresence>
+              {pendingStatusConfirm && (
+                <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/45 backdrop-blur-sm">
+                  <div className="absolute inset-0" onClick={() => !statusUpdateSubmitting && setPendingStatusConfirm(null)} />
+                  <motion.div
+                    initial={{ scale: 0.95, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.95, opacity: 0 }}
+                    transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+                    className="bg-[var(--surface)] w-full max-w-sm mx-auto border border-[var(--border)] shadow-2xl relative z-10 p-6 rounded-[28px]"
+                  >
+                    <h3 className="font-serif text-lg font-bold mb-2">Mark as Delivered?</h3>
+                    <p className="text-xs text-[var(--text-secondary)] leading-relaxed mb-6">
+                      This order has ₹{pendingStatusConfirm.balanceDue.toLocaleString('en-IN')} balance due. Mark as Delivered anyway?
+                    </p>
+                    <div className="flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setPendingStatusConfirm(null)}
+                        disabled={statusUpdateSubmitting}
+                        className="flex-1 py-3 rounded-2xl text-xs font-bold border border-[var(--border)] text-[var(--text-primary)] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={confirmPendingStatusChange}
+                        disabled={statusUpdateSubmitting}
+                        className="flex-1 py-3 rounded-2xl text-xs font-bold bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        {statusUpdateSubmitting ? 'Saving…' : 'Confirm'}
+                      </button>
+                    </div>
                   </motion.div>
                 </div>
               )}
