@@ -23,6 +23,7 @@ import {
   haversineDistanceKm,
 } from '@/lib/marketplace/client';
 import { useAddToCart } from '@/lib/marketplace/useAddToCart';
+import { MarketplaceComingSoon } from '@/components/marketplace/MarketplaceComingSoon';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -528,7 +529,7 @@ export default function Webapp() {
   const [activeSheet, setActiveSheet] = useState<
     'none' | 'new-order' | 'edit-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
-    'subscription-status' | 'help-support' | 'legal-policies' |
+    'subscription-status' | 'help-support' |
     'my-menu' | 'add-edit-menu-item' | 'share-menu' | 'supply-catalogue' | 'supply-cart' | 'supply-orders'
   >('none');
 
@@ -560,22 +561,44 @@ export default function Webapp() {
   // backend calls (caption text via the existing /notifications/whatsapp
   // endpoint keyed by the order's UUID `id`, then the branded PNG via the
   // new /receipt-image endpoint keyed by the display `orderId`) followed
-  // by a fetch of the resulting signed image URL. navigator.share's file
-  // support is device/browser-dependent — can only be truly verified on a
-  // real phone in real WhatsApp, not in a desktop browser — so this always
-  // has a manual download + wa.me fallback for when it's unavailable.
+  // by a fetch of the resulting signed image URL. Deliberately skips the
+  // OS share sheet (navigator.share) and jumps straight to wa.me with the
+  // customer's own number (whatsappUrl is keyed off order.customer.phone
+  // server-side, see notifications.service.ts) — WhatsApp's deep-link API
+  // only supports prefilled text, not an attached file, so the receipt
+  // image still has to be downloaded and manually attached once the chat
+  // opens; this only removes the app-picker/contact-picker hunting.
   //
-  // navigator.share() must run synchronously inside a live user-gesture —
-  // confirmed live (desktop Chrome) that calling it after the two awaited
-  // network round-trips above throws "Must be handling a user gesture",
-  // because that async work (image generation alone ran ~2.5s) outlasts
-  // the browser's activation window. So this is a two-tap flow: the first
-  // tap fetches everything and stores it in receiptSharePayload; a second,
-  // fresh tap calls navigator.share() with no awaits before it.
+  // window.open() must run synchronously inside a live user-gesture —
+  // same constraint navigator.share() had — so this is a two-tap flow:
+  // the first tap fetches everything and stores it in receiptSharePayload;
+  // a second, fresh tap triggers the download and window.open() with no
+  // awaits before them.
   const [receiptSharing, setReceiptSharing] = useState(false);
   const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
-  const [receiptShareFallback, setReceiptShareFallback] = useState(false);
-  const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; text: string } | null>(null);
+  const [receiptShareSent, setReceiptShareSent] = useState(false);
+  const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; whatsappUrl: string } | null>(null);
+  // A fast double-tap on either button fires two click events before React
+  // re-renders to disable/hide it — state alone doesn't close that window
+  // since setState is batched/async, so both taps would still see the old
+  // (non-null / not-yet-loading) values and run twice, e.g. downloading the
+  // receipt image twice and opening WhatsApp twice. Refs mutate
+  // synchronously, so checking-and-setting one at the top of each handler
+  // closes the window a state check can't.
+  //
+  // receiptShareInFlightRef guards prepareReceiptShare, which is async, so
+  // resetting it once that call settles (success or error) is correct and
+  // lets the next legitimate prepare through.
+  //
+  // confirmReceiptShare has no awaits at all — its whole body, including
+  // any reset of a flag, would finish before a second synchronous click
+  // even starts, so a reset-at-the-end guard can never actually block
+  // anything. receiptShareConfirmedRef is deliberately never reset inside
+  // confirmReceiptShare itself; it's only cleared when a fresh payload is
+  // prepared, so it stays locked for the rest of this payload's lifetime
+  // once consumed.
+  const receiptShareInFlightRef = useRef(false);
+  const receiptShareConfirmedRef = useRef(false);
 
   const openCustomerProfile = useCallback((customerId: string) => {
     setSelectedOrderDetail(null);
@@ -595,7 +618,7 @@ export default function Webapp() {
     setSelectedCustomerProfile(null);
     setOrderDetailError(null);
     setReceiptShareError(null);
-    setReceiptShareFallback(false);
+    setReceiptShareSent(false);
     setReceiptSharePayload(null);
     setActiveSheet('customer-profile');
     setOrderDetailLoading(true);
@@ -680,8 +703,10 @@ export default function Webapp() {
 
   const prepareReceiptShare = useCallback(async (order: { id: string; orderId: string }) => {
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    if (receiptShareInFlightRef.current) return;
+    receiptShareInFlightRef.current = true;
     setReceiptShareError(null);
-    setReceiptShareFallback(false);
+    setReceiptShareSent(false);
     setReceiptSharePayload(null);
     setReceiptSharing(true);
     try {
@@ -689,7 +714,6 @@ export default function Webapp() {
         '/api/notifications/whatsapp',
         { orderId: order.id, template: 'RECEIPT' }
       );
-      const text = new URL(notifRes.data.whatsappUrl).searchParams.get('text') || '';
 
       const imageRes = await api.post<{ success: boolean; data: { imageUrl: string } }>(
         `/api/orders/${order.orderId}/receipt-image`,
@@ -701,24 +725,12 @@ export default function Webapp() {
       const blob = await imgRes.blob();
       const file = new File([blob], `receipt-${order.orderId}.png`, { type: 'image/png' });
 
-      if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
-        // Can't call navigator.share() here — see the comment on
-        // receiptSharePayload above. Stash the prepared file/text; the
-        // "Tap to Send via WhatsApp" button's own click handler calls
-        // navigator.share() synchronously with no awaits before it.
-        setReceiptSharePayload({ file, text });
-      } else {
-        const downloadUrl = URL.createObjectURL(file);
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(downloadUrl);
-        window.open(notifRes.data.whatsappUrl, '_blank');
-        setReceiptShareFallback(true);
-      }
+      // Can't trigger the download / window.open() here — see the comment
+      // on receiptSharePayload above. Stash the prepared file/link; the
+      // "Tap to Send via WhatsApp" button's own click handler fires both
+      // synchronously with no awaits before it.
+      receiptShareConfirmedRef.current = false;
+      setReceiptSharePayload({ file, whatsappUrl: notifRes.data.whatsappUrl });
     } catch (err: any) {
       if (err?.errorCode === 'WHATSAPP_RECEIPT_DISABLED') {
         setReceiptShareError('WhatsApp receipts are turned off for your account.');
@@ -727,6 +739,7 @@ export default function Webapp() {
       }
     } finally {
       setReceiptSharing(false);
+      receiptShareInFlightRef.current = false;
     }
     // isPaywalled deliberately included: without it this callback would
     // freeze the read-only check at whatever isPaywalled was on first
@@ -734,19 +747,22 @@ export default function Webapp() {
   }, [isPaywalled]);
 
   const confirmReceiptShare = useCallback(() => {
-    if (!receiptSharePayload) return;
-    const { file, text } = receiptSharePayload;
-    navigator
-      .share({ files: [file], text })
-      .then(() => setReceiptSharePayload(null))
-      .catch((err: any) => {
-        // The user dismissing the native share sheet themselves throws
-        // AbortError — not a real failure. Keep the prepared payload so
-        // they can just tap "Tap to Send" again without re-fetching.
-        if (err?.name !== 'AbortError') {
-          setReceiptShareError(err.message || 'Could not share the receipt. Please try again.');
-        }
-      });
+    if (!receiptSharePayload || receiptShareConfirmedRef.current) return;
+    receiptShareConfirmedRef.current = true;
+    const { file, whatsappUrl } = receiptSharePayload;
+    const downloadUrl = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(downloadUrl);
+    window.open(whatsappUrl, '_blank');
+    setReceiptShareSent(true);
+    setReceiptSharePayload(null);
+    // Deliberately not resetting receiptShareConfirmedRef here — see the
+    // comment on it above.
   }, [receiptSharePayload]);
 
   // Payment-reminder quick action (POST /api/notifications/whatsapp,
@@ -2858,7 +2874,7 @@ export default function Webapp() {
 
                   <p className="text-center text-[11px] leading-relaxed text-[var(--text-secondary)] px-4 max-w-[280px]">
                     By continuing, you agree to Kamai&apos;s<br />
-                    <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Terms of Service</span> and <span className="text-[var(--accent)] cursor-pointer hover:underline font-medium">Privacy Policy</span>.
+                    <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Privacy Policy</a>.
                   </p>
                 </div>
               </div>
@@ -3926,8 +3942,14 @@ export default function Webapp() {
                 </div>
               )}
 
-              {/* TAB 5: SUPPLY HUB — Screen 1: Browse Suppliers */}
+              {/* TAB 5: SUPPLY HUB — Screen 1: Browse Suppliers.
+                  Gated behind NEXT_PUBLIC_FEATURE_MARKETPLACE - any value
+                  other than the exact string "true" (including unset)
+                  renders the Coming Soon placeholder instead. The nav tab
+                  itself always stays visible/tappable either way; only
+                  this content branch changes. */}
               {activeTab === 'supply' && (
+                process.env.NEXT_PUBLIC_FEATURE_MARKETPLACE === 'true' ? (
                 <div className="w-full animate-fadeIn">
 
                   {/* Header Title */}
@@ -4056,6 +4078,9 @@ export default function Webapp() {
                   </div>
 
                 </div>
+                ) : (
+                  <MarketplaceComingSoon />
+                )
               )}
 
               {/* TAB 6: SETTINGS (MORE) - Desktop layouts render these settings cards directly */}
@@ -4260,16 +4285,31 @@ export default function Webapp() {
                           <ChevronRight size={14} className="text-[var(--text-secondary)]" />
                         </div>
 
-                        <div
-                          onClick={() => setActiveSheet('legal-policies')}
+                        <a
+                          href="/terms"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center justify-between py-2.5 border-b border-[var(--border)]/50 cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <FileText size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Terms of Service</span>
+                          </div>
+                          <ChevronRight size={14} className="text-[var(--text-secondary)]" />
+                        </a>
+
+                        <a
+                          href="/privacy"
+                          target="_blank"
+                          rel="noopener noreferrer"
                           className="flex items-center justify-between py-2.5 cursor-pointer group"
                         >
                           <div className="flex items-center gap-2">
                             <Shield size={15} className="text-[var(--text-secondary)] group-hover:text-[var(--accent)]" />
-                            <span className="text-xs font-medium text-[var(--text-primary)]">Privacy Policy & Terms</span>
+                            <span className="text-xs font-medium text-[var(--text-primary)]">Privacy Policy</span>
                           </div>
                           <ChevronRight size={14} className="text-[var(--text-secondary)]" />
-                        </div>
+                        </a>
                       </div>
                     </div>
 
@@ -4316,8 +4356,17 @@ export default function Webapp() {
                     </div>
                   </div>
 
-                  {/* Grid Split: Form on left, recent logs on right */}
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+                  {/* Grid Split: Form on left, recent logs on right.
+                      Deliberately grid-cols-1 at every width, not just
+                      lg:grid-cols-3 stripped to grid-cols-1 — the app shell
+                      (see the outer max-w-[480px] wrapper) caps rendered
+                      width at 480px regardless of the actual device/browser
+                      viewport, so a `lg:` breakpoint (1024px) still fires
+                      on a wide screen even though the visible content stays
+                      480px wide, squeezing a 3-column layout into a
+                      phone-width card. Matches the single-column layout
+                      that was already correct on narrow viewports. */}
+                  <div className="grid grid-cols-1 gap-6 items-start">
 
                     {/* Log form (Left Column) — real fields: quantity x
                         pricePerUnit (server computes totalCost), not a flat
@@ -4446,14 +4495,16 @@ export default function Webapp() {
                         </div>
                       )}
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Same fixed-shell-width reasoning as the grid
+                          above — always single column, not sm:grid-cols-2. */}
+                      <div className="grid grid-cols-1 gap-4">
                         {investmentsLoading &&
                           [0, 1, 2, 3].map((i) => (
                             <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
                           ))}
 
                         {!investmentsLoading && !investmentsError && investmentsList.length === 0 && (
-                          <p className="text-xs text-[var(--text-secondary)] text-center py-8 sm:col-span-2">No expenses logged yet.</p>
+                          <p className="text-xs text-[var(--text-secondary)] text-center py-8">No expenses logged yet.</p>
                         )}
 
                         {!investmentsLoading &&
@@ -5248,7 +5299,7 @@ export default function Webapp() {
                               setActiveSheet('none');
                               setSelectedOrderDetail(null);
                               setReceiptShareError(null);
-                              setReceiptShareFallback(false);
+                              setReceiptShareSent(false);
                               setReceiptSharePayload(null);
                             }}
                             className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"
@@ -5443,9 +5494,9 @@ export default function Webapp() {
                                     )}
                                   </button>
                                 )}
-                                {receiptShareFallback && (
+                                {receiptShareSent && (
                                   <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200/50 text-blue-700 dark:text-blue-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
-                                    <Download size={12} /> Image downloaded — attach it in WhatsApp to send.
+                                    <Download size={12} /> Image downloaded — attach it in the WhatsApp chat that just opened.
                                   </div>
                                 )}
                                 {receiptShareError && (
@@ -6052,6 +6103,11 @@ export default function Webapp() {
                             <AlertCircle size={13} /> {subscriptionError}
                           </div>
                         )}
+                        <p className="text-center text-[10.5px] leading-relaxed text-[var(--text-secondary)] px-2 mb-3">
+                          By subscribing, you agree to our{' '}
+                          <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Terms of Service</a> and{' '}
+                          <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline font-medium">Privacy Policy</a>.
+                        </p>
                         <button
                           onClick={handleConfirmSubscription}
                           disabled={subscriptionSubmitting}
@@ -6160,7 +6216,7 @@ export default function Webapp() {
 
                             <button
                               type="button"
-                              onClick={() => window.open('https://wa.me/919876543210', '_blank')}
+                              onClick={() => window.open('https://wa.me/919874353532', '_blank')}
                               className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold py-3.5 rounded-xl shadow-md transition-all active:scale-[0.98] flex items-center justify-center gap-2 mt-4 text-xs cursor-pointer"
                             >
                               <Send size={14} className="rotate-45" /> Open WhatsApp Chat
@@ -6214,60 +6270,6 @@ export default function Webapp() {
                           </div>
 
                         </div>
-                      </div>
-                    )}
-
-                    {/* SHEET: LEGAL & POLICIES */}
-                    {activeSheet === 'legal-policies' && (
-                      <div className="flex-1 flex flex-col">
-                        <div className="flex justify-between items-center mb-6">
-                          <button onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
-                          <h3 className="font-serif text-xl md:text-2xl font-bold">Legal & Policies</h3>
-                          <div className="w-6"></div>
-                        </div>
-
-                        <div className="flex flex-col gap-6 pb-6 overflow-y-auto">
-
-                          <div className="bg-orange-50/50 dark:bg-[#1A0C06] p-4 rounded-2xl border border-orange-100/50 flex items-center gap-3">
-                            <span className="text-2xl">🛡️</span>
-                            <div>
-                              <h4 className="font-bold text-xs text-[var(--text-primary)]">Last updated: October 2026</h4>
-                              <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">Review Kamai&apos;s merchant terms, data protection standards, and refund policies.</p>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-col gap-2">
-                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">1. Merchant Terms of Service</h4>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              By accessing or using Kamai (the &quot;Platform&quot;), you agree to be bound by these Terms of Service. Kamai is an Order Management System built for independent home bakers to manage orders, customers, invoices, payments, and business insights.
-                            </p>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              You are responsible for maintaining the accuracy of your business information, fulfilling orders on time, and complying with all applicable laws and food safety regulations in India.
-                            </p>
-                          </div>
-
-                          <div className="flex flex-col gap-2">
-                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">2. Data Protection & Privacy Policy</h4>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              We take your privacy seriously. Kamai securely stores your data on Supabase, a globally trusted and secure database infrastructure. We collect and store only the data necessary to operate the Platform, including customer phone numbers, order details, payment history, and business metrics.
-                            </p>
-                          </div>
-
-                          <div className="flex flex-col gap-2 mb-6">
-                            <h4 className="font-serif font-bold text-sm text-[var(--text-primary)]">3. Subscription & Cancellation Policy</h4>
-                            <p className="text-[10.5px] text-[var(--text-secondary)] leading-relaxed">
-                              Kamai offers a 30-day free trial for all new bakers. After the trial, you will be charged the then-current monthly rate via Razorpay UPI AutoPay — ₹149/month for the first 149 bakers to subscribe, ₹199/month thereafter. Whichever rate applies when your subscription is created is what you continue paying for as long as it stays active; cancelling and re-subscribing later re-applies whatever the current rate is at that time. You may cancel your subscription at any time.
-                            </p>
-                          </div>
-
-                        </div>
-
-                        <button
-                          type="button"
-                          className="w-full bg-[var(--surface)] text-[var(--accent)] border border-[var(--accent)]/50 hover:bg-orange-50 dark:hover:bg-orange-950/20 font-semibold py-4 rounded-2xl transition-all active:scale-[0.99] flex items-center justify-center gap-2 mt-auto cursor-pointer"
-                        >
-                          📄 Download Terms as PDF
-                        </button>
                       </div>
                     )}
 
