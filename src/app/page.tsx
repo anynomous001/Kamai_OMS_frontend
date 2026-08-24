@@ -415,13 +415,15 @@ const initialExpenses: Expense[] = [
 ];
 
 // Shared order card — originally the calendar date-drill-down card, now also
-// used by the Dashboard's Upcoming section (see Fix 4) so both surfaces show
-// the same order info in the same layout. cakeFlavour isn't included: it
-// isn't present on either GET /api/orders (calendar) or GET
-// /api/dashboard/summary (dashboard upcomingOrders) list responses, only on
-// the single order-detail endpoint. advancePaid/onRemind/reminding are
-// optional since the calendar's month-orders data doesn't carry an advance
-// amount or a reminder affordance the way the dashboard's does.
+// used by both Dashboard sections (Bake Today and Upcoming — see Fix 4 and
+// the Bake Today follow-up) so all three surfaces show the same order info
+// in the same layout. cakeFlavour isn't included: it isn't present on
+// GET /api/orders (calendar), GET /api/dashboard/summary (dashboard
+// todayOrders/upcomingOrders), or the per-order fetch Bake Today makes to
+// backfill customerName/cakeCategory — only the single order-detail
+// endpoint's full payload has it. advancePaid/totalPrice/onRemind/reminding
+// are optional since the calendar's month-orders data doesn't carry an
+// advance amount or a reminder affordance the way the dashboard's does.
 interface OrderCardData {
   orderNumber: string;
   customerName: string | null;
@@ -433,6 +435,7 @@ interface OrderCardData {
   status: RealOrderStatus;
   advancePaid?: number | null;
   balanceDue: number;
+  totalPrice?: number;
 }
 
 function OrderCard({
@@ -446,6 +449,7 @@ function OrderCard({
   onRemind?: () => void;
   reminding?: boolean;
 }) {
+  const paymentStatus = order.totalPrice != null ? derivePaymentStatus(order.totalPrice, order.balanceDue) : null;
   return (
     <div
       className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] shadow-sm flex flex-col gap-3 hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
@@ -484,9 +488,20 @@ function OrderCard({
             Advance ₹{order.advancePaid.toLocaleString('en-IN')}
           </span>
         )}
-        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]">
-          Balance ₹{order.balanceDue.toLocaleString('en-IN')}
-        </span>
+        {paymentStatus === 'Paid' ? (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-100">
+            Fully Paid
+          </span>
+        ) : (
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${paymentStatus === 'Unpaid'
+            ? 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border-red-200/50'
+            : paymentStatus === 'Partially Paid'
+              ? 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200/50'
+              : 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-[var(--border)]'
+            }`}>
+            {paymentStatus ? `${paymentStatus} • ` : 'Balance '}₹{order.balanceDue.toLocaleString('en-IN')}
+          </span>
+        )}
         {onRemind && order.balanceDue > 0 && (
           <button
             type="button"
@@ -513,6 +528,15 @@ export default function Webapp() {
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
+
+  // Bake Today (dashboardSummary.todayOrders) only carries orderNumber/
+  // status/totalPrice/balanceDue/deliveryDate — no customerName/cakeCategory,
+  // both of which the shared OrderCard needs to render its body. Fetching
+  // GET /api/orders/:orderNumber per today-order (usually a handful) fills
+  // that in, reusing the same RecordPaymentDetail shape openRecordPayment
+  // already fetches. Keyed by orderNumber; 'error' marks a failed fetch so
+  // it renders a sparse fallback instead of hanging on a loading skeleton.
+  const [todayOrderDetails, setTodayOrderDetails] = useState<Record<string, RecordPaymentDetail | 'error'>>({});
 
   // Email login fields
   const [email, setEmail] = useState('');
@@ -1655,6 +1679,25 @@ export default function Webapp() {
       fetchDashboardSummary();
     }
   }, [step, fetchDashboardSummary]);
+
+  // Enrich Bake Today's orders with the customerName/cakeCategory OrderCard
+  // needs (see todayOrderDetails above) — one GET /api/orders/:orderNumber
+  // per order not already fetched. Deliberately excludes todayOrderDetails
+  // from the deps array (only reads it to skip already-fetched orders);
+  // including it would refire this effect every time it sets state.
+  useEffect(() => {
+    const orders = dashboardSummary?.todayOrders;
+    if (!orders || orders.length === 0) return;
+    orders
+      .filter((o) => !(o.orderNumber in todayOrderDetails))
+      .forEach((o) => {
+        api
+          .get<{ success: boolean; data: RecordPaymentDetail }>(`/api/orders/${o.orderNumber}`)
+          .then((res) => setTodayOrderDetails((prev) => ({ ...prev, [o.orderNumber]: res.data })))
+          .catch(() => setTodayOrderDetails((prev) => ({ ...prev, [o.orderNumber]: 'error' })));
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dashboardSummary?.todayOrders]);
 
   // Fetch real orders list. Extracted as a stable callback (not just inline
   // in the effect below) so it can also be called directly right after
@@ -3289,14 +3332,15 @@ export default function Webapp() {
                       </span>
                     </div>
 
-                    {/* Stacked vertical list of Priority items — sourced from
-                        dashboardSummary.todayOrders, which only carries
-                        orderNumber/status/totalPrice/balanceDue/deliveryDate.
-                        No cake name/photo/customer name/time here (the mock
-                        UI assumed those existed at this level; the real
-                        dashboard endpoint doesn't provide them — that detail
-                        only exists on the single order-details endpoint).
-                        Flagging this as a real UX reduction vs. the mock. */}
+                    {/* Stacked vertical list of Priority items — reuses
+                        OrderCard, same as Calendar/Upcoming (see Fix 4 and
+                        the Bake Today follow-up). dashboardSummary.
+                        todayOrders itself only carries orderNumber/status/
+                        totalPrice/balanceDue/deliveryDate, so each order's
+                        customerName/cakeCategory/etc. come from the
+                        per-order enrichment fetch in todayOrderDetails
+                        (see the effect above) — a card renders a loading
+                        skeleton until its detail arrives. */}
                     <div className="flex flex-col gap-4">
                       {dashboardLoading && (
                         <div className="flex flex-col gap-4">
@@ -3312,47 +3356,33 @@ export default function Webapp() {
 
                       {!dashboardLoading &&
                         dashboardSummary?.todayOrders.map((o) => {
-                          const paymentStatus = derivePaymentStatus(o.totalPrice, o.balanceDue);
+                          const detail = todayOrderDetails[o.orderNumber];
+                          if (!detail) {
+                            return <div key={o.id} className="h-[132px] bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />;
+                          }
+                          const cardData: OrderCardData =
+                            detail === 'error'
+                              ? { orderNumber: o.orderNumber, customerName: null, cakeCategory: 'Order', status: o.status, balanceDue: o.balanceDue, totalPrice: o.totalPrice }
+                              : {
+                                  orderNumber: o.orderNumber,
+                                  customerName: detail.customer?.name ?? null,
+                                  cakeCategory: detail.cake.category,
+                                  quantity: detail.cake.quantity,
+                                  weightInPounds: detail.cake.weightInPounds,
+                                  deliveryTime: detail.delivery.time,
+                                  status: o.status,
+                                  advancePaid: detail.payment.advancePaid,
+                                  balanceDue: o.balanceDue,
+                                  totalPrice: o.totalPrice,
+                                };
                           return (
                             <div key={o.id} className="flex flex-col gap-2">
-                              <div
-                                className="bg-[var(--surface)] p-4 rounded-[22px] border border-[var(--border)] flex items-center gap-4 shadow-sm hover:shadow-md transition-all cursor-pointer hover:border-[var(--accent)]/30"
+                              <OrderCard
+                                order={cardData}
                                 onClick={() => openOrderDetail(o.orderNumber)}
-                              >
-                                <div className="w-16 h-16 rounded-2xl overflow-hidden bg-neutral-100 dark:bg-neutral-900 flex-shrink-0 border border-[var(--border)] flex items-center justify-center text-3xl">
-                                  🎂
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <h4 className="font-serif font-bold text-sm md:text-base text-[var(--text-primary)] truncate">{o.orderNumber}</h4>
-                                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
-                                    <span className="text-[var(--accent)] font-semibold">{o.status}</span> • ₹{o.totalPrice.toLocaleString('en-IN')}
-                                  </p>
-                                </div>
-                                <div className="flex-shrink-0 flex flex-col items-end gap-1.5">
-                                  {paymentStatus === 'Paid' ? (
-                                    <span className="bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 text-[10px] font-bold px-2.5 py-1.5 rounded-full border border-emerald-100">
-                                      Fully Paid
-                                    </span>
-                                  ) : (
-                                    <>
-                                      <span className={`text-[10px] font-bold px-2.5 py-1.5 rounded-full border whitespace-nowrap ${paymentStatus === 'Unpaid'
-                                        ? 'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border-red-200/50'
-                                        : 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200/50'
-                                        }`}>
-                                        {paymentStatus} • ₹{o.balanceDue.toLocaleString('en-IN')}
-                                      </span>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); sendPaymentReminder(o.id); }}
-                                        disabled={sendingReminderId === o.id}
-                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border border-emerald-200/50 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
-                                      >
-                                        <Send size={11} />
-                                        {sendingReminderId === o.id ? 'Sending…' : 'Remind'}
-                                      </button>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
+                                onRemind={() => sendPaymentReminder(o.id)}
+                                reminding={sendingReminderId === o.id}
+                              />
                               {reminderErrors[o.id] && (
                                 <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
                                   <AlertCircle size={12} /> {reminderErrors[o.id]}
