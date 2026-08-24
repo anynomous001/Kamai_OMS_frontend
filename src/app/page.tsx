@@ -160,6 +160,29 @@ function statusChipStyle(status: RealOrderStatus): { backgroundColor: string; co
   return { backgroundColor: `${hex}26`, color: hex };
 }
 
+// Persisted "+ Add your own" cake category/flavour entries (New Order form)
+// — scoped per baker (bakerProfile.id) in localStorage since there's no
+// backend endpoint for distinct past values (confirmed none exists; see
+// PR #46's audit). Best-effort: any localStorage failure (private browsing,
+// quota, corrupted value) just falls back to the hardcoded presets only.
+const CUSTOM_CAKE_STORAGE_PREFIX = 'kamai:customCake';
+function readCustomCakeOptions(kind: 'Categories' | 'Flavours', bakerId: string): string[] {
+  try {
+    const raw = localStorage.getItem(`${CUSTOM_CAKE_STORAGE_PREFIX}${kind}:${bakerId}`);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+function writeCustomCakeOptions(kind: 'Categories' | 'Flavours', bakerId: string, values: string[]) {
+  try {
+    localStorage.setItem(`${CUSTOM_CAKE_STORAGE_PREFIX}${kind}:${bakerId}`, JSON.stringify(values));
+  } catch {
+    // best-effort only
+  }
+}
+
 // "1" -> "1 pc", "2" -> "2 pcs"; falls back to weight when quantity isn't
 // set (orders can be priced by weight instead of piece count — see cake.
 // weightInPounds in the order-detail payload). Neither present -> em dash.
@@ -895,6 +918,16 @@ export default function Webapp() {
   // Custom cake category/flavour ("+ Add your own") — New Order form.
   const [customCakeCategoryMode, setCustomCakeCategoryMode] = useState(false);
   const [customCakeFlavourMode, setCustomCakeFlavourMode] = useState(false);
+  // Persisted past custom entries (see readCustomCakeOptions above) —
+  // loaded once bakerProfile.id is known, since they're scoped per baker.
+  const [customCategoryOptions, setCustomCategoryOptions] = useState<string[]>([]);
+  const [customFlavourOptions, setCustomFlavourOptions] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!bakerProfile?.id) return;
+    setCustomCategoryOptions(readCustomCakeOptions('Categories', bakerProfile.id));
+    setCustomFlavourOptions(readCustomCakeOptions('Flavours', bakerProfile.id));
+  }, [bakerProfile?.id]);
 
   // Debounced (300ms) customer search for the New Order form's autocomplete
   // — only runs while the dropdown is open, mirrors the Customers tab's own
@@ -2737,6 +2770,24 @@ export default function Webapp() {
           },
         },
       );
+
+      // Persist any custom category/flavour ("+ Add your own") this order
+      // used, so it shows up as a preset option next time this baker opens
+      // New Order — see readCustomCakeOptions/writeCustomCakeOptions above.
+      if (bakerProfile?.id) {
+        const category = newOrderForm.cakeCategory.trim();
+        if (category && !CAKE_CATEGORIES.includes(category) && !customCategoryOptions.includes(category)) {
+          const next = [...customCategoryOptions, category];
+          writeCustomCakeOptions('Categories', bakerProfile.id, next);
+          setCustomCategoryOptions(next);
+        }
+        const flavour = newOrderForm.flavour.trim();
+        if (flavour && !CAKE_FLAVOURS.includes(flavour) && !customFlavourOptions.includes(flavour)) {
+          const next = [...customFlavourOptions, flavour];
+          writeCustomCakeOptions('Flavours', bakerProfile.id, next);
+          setCustomFlavourOptions(next);
+        }
+      }
 
       setNewOrderForm(getDefaultNewOrderForm());
       setNewOrderAdvanceTouched(false);
@@ -5027,6 +5078,7 @@ export default function Webapp() {
                                   className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
                                 >
                                   {CAKE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                                  {customCategoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
                                   <option value="__custom__">+ Add your own</option>
                                 </select>
                               )}
@@ -5064,6 +5116,7 @@ export default function Webapp() {
                                   className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
                                 >
                                   {CAKE_FLAVOURS.map((f) => <option key={f} value={f}>{f}</option>)}
+                                  {customFlavourOptions.map((f) => <option key={f} value={f}>{f}</option>)}
                                   <option value="__custom__">+ Add your own</option>
                                 </select>
                               )}
