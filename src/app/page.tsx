@@ -12,7 +12,7 @@ import {
   UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy,
   Share2, Download, Store, Truck, Clock,
   ArrowUpDown, ShoppingCart, Minus, MapPin, RotateCcw,
-  IndianRupee, PiggyBank
+  IndianRupee, PiggyBank, Camera, Receipt
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -309,6 +309,7 @@ interface RealInvestmentEntry {
   totalCost: number;
   supplierName: string | null;
   purchaseDate: string;
+  receiptPhotoUrl: string | null;
 }
 
 // Real menu-item unit vocab (per confirmed backend contract, Action 26).
@@ -1258,6 +1259,28 @@ export default function Webapp() {
   const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
   const [logExpenseSubmitting, setLogExpenseSubmitting] = useState(false);
   const [logExpenseError, setLogExpenseError] = useState<string | null>(null);
+
+  // Quick Total mode — a stripped-down alternative to the Detailed form
+  // above (category + amount + optional note/receipt photo), posting to
+  // the same POST /api/investments as Detailed. Detailed's own state/
+  // handler above is untouched; Quick Total gets its own form state but
+  // shares logExpenseSubmitting/logExpenseError since only one form is
+  // ever visible at a time.
+  const [expenseLogMode, setExpenseLogMode] = useState<'detailed' | 'quick'>('detailed');
+  const [quickExpenseForm, setQuickExpenseForm] = useState({
+    category: 'ingredients' as RealInvestmentCategory,
+    amount: '',
+    note: '',
+    receiptPhotoPath: '',
+    receiptPhotoPreviewUrl: '',
+  });
+  const [quickExpensePhotoUploading, setQuickExpensePhotoUploading] = useState(false);
+  const [quickExpensePhotoUploadError, setQuickExpensePhotoUploadError] = useState<string | null>(null);
+
+  // Full-screen receipt photo viewer — independent overlay state (not an
+  // activeSheet value) so it can open from the Expenses tab's Recent
+  // Purchases list without navigating away from it.
+  const [receiptLightboxUrl, setReceiptLightboxUrl] = useState<string | null>(null);
 
   // Finance Analytics (below the Expense Ledger) — real GET
   // /api/analytics/summary. Trend (charts 1 & 3) is always the trailing
@@ -2694,6 +2717,76 @@ export default function Webapp() {
         purchaseDate: new Date().toISOString().slice(0, 10),
         supplierName: '',
       });
+      fetchInvestments();
+      fetchMonthlySpend();
+    } catch (err: any) {
+      setLogExpenseError(err.message || 'Failed to log expense.');
+    } finally {
+      setLogExpenseSubmitting(false);
+    }
+  };
+
+  // Receipt photo upload for Quick Total — mirrors handleMenuItemPhotoUpload's
+  // signed-upload + direct-PUT flow (category=INVESTMENT_RECEIPT), skipping
+  // /api/uploads/confirm the same way MENU_ITEM_PHOTO does: the backend
+  // verifies receiptPhotoPath actually exists in storage when the investment
+  // is created (see investments.service.ts), so confirming here would be
+  // redundant.
+  const handleQuickExpensePhotoUpload = async (file: File) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    setQuickExpensePhotoUploading(true);
+    setQuickExpensePhotoUploadError(null);
+    try {
+      const { data } = await api.post<{ success: boolean; data: { uploadUrl: string; filePath: string } }>(
+        '/api/uploads/signed-url',
+        { contentType: file.type, category: 'INVESTMENT_RECEIPT', originalFilename: file.name },
+      );
+
+      const uploadRes = await fetch(data.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!uploadRes.ok) {
+        throw new Error('Upload to storage failed. Please try again.');
+      }
+
+      setQuickExpenseForm((f) => ({ ...f, receiptPhotoPath: data.filePath, receiptPhotoPreviewUrl: URL.createObjectURL(file) }));
+    } catch (err: any) {
+      // Never blocks logging the expense — the baker can retry the photo
+      // or just submit without one; receiptPhotoPath simply stays unset.
+      setQuickExpensePhotoUploadError(err.message || 'Failed to upload photo.');
+    } finally {
+      setQuickExpensePhotoUploading(false);
+    }
+  };
+
+  const handleLogQuickExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    const amount = Number(quickExpenseForm.amount);
+    if (!amount || amount <= 0) return;
+
+    setLogExpenseSubmitting(true);
+    setLogExpenseError(null);
+    try {
+      // Quick Total entries are still plain investments rows, not a
+      // different data type — quantity/unit are fixed at 1/'expense' so
+      // pricePerUnit (== amount) is what the server computes totalCost
+      // from, and materialName (required by the API but not collected in
+      // this form) falls back to the category label.
+      await api.post('/api/investments', {
+        category: quickExpenseForm.category,
+        materialName: quickExpenseForm.category.charAt(0).toUpperCase() + quickExpenseForm.category.slice(1),
+        quantity: 1,
+        unit: 'expense',
+        pricePerUnit: amount,
+        purchaseDate: new Date().toISOString().slice(0, 10),
+        description: quickExpenseForm.note.trim() || undefined,
+        ...(quickExpenseForm.receiptPhotoPath ? { receiptPhotoPath: quickExpenseForm.receiptPhotoPath } : {}),
+      });
+      setQuickExpenseForm({ category: 'ingredients', amount: '', note: '', receiptPhotoPath: '', receiptPhotoPreviewUrl: '' });
+      setQuickExpensePhotoUploadError(null);
       fetchInvestments();
       fetchMonthlySpend();
     } catch (err: any) {
@@ -4544,8 +4637,30 @@ export default function Webapp() {
                     {/* Log form (Left Column) — real fields: quantity x
                         pricePerUnit (server computes totalCost), not a flat
                         "amount"; real category vocab; purchaseDate required. */}
-                    <form onSubmit={handleLogExpense} className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm">
-                      <h4 className="font-serif font-bold text-base mb-4">Log New Expense</h4>
+                    <div className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="font-serif font-bold text-base">Log New Expense</h4>
+                        {/* Detailed = the original form below, completely
+                            unchanged. Quick Total = category + amount + note
+                            + optional receipt photo, posting to the same
+                            POST /api/investments. */}
+                        <div className="flex bg-[var(--background)] border border-[var(--border)] rounded-full p-0.5 text-[10px] font-bold">
+                          <button
+                            type="button"
+                            onClick={() => setExpenseLogMode('detailed')}
+                            className={`px-3 py-1.5 rounded-full transition-colors cursor-pointer ${expenseLogMode === 'detailed' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'}`}
+                          >
+                            Detailed
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setExpenseLogMode('quick')}
+                            className={`px-3 py-1.5 rounded-full transition-colors cursor-pointer ${expenseLogMode === 'quick' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'}`}
+                          >
+                            Quick Total
+                          </button>
+                        </div>
+                      </div>
 
                       {logExpenseError && (
                         <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium mb-3 flex items-center gap-2">
@@ -4553,6 +4668,8 @@ export default function Webapp() {
                         </div>
                       )}
 
+                      {expenseLogMode === 'detailed' ? (
+                      <form onSubmit={handleLogExpense}>
                       <div className="flex flex-col gap-3.5">
                         <div>
                           <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Material / item</label>
@@ -4655,7 +4772,99 @@ export default function Webapp() {
                           <Plus size={16} strokeWidth={2.5} /> {logExpenseSubmitting ? 'Logging...' : 'Log Purchase'}
                         </button>
                       </div>
-                    </form>
+                      </form>
+                      ) : (
+                      <form onSubmit={handleLogQuickExpense}>
+                      {quickExpensePhotoUploadError && (
+                        <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium mb-3 flex items-center gap-2">
+                          <AlertCircle size={13} /> {quickExpensePhotoUploadError}
+                        </div>
+                      )}
+                      <div className="flex flex-col gap-3.5">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Amount (₹)</label>
+                            <div className="flex items-center border border-[var(--border)] rounded-xl bg-[var(--background)] px-3 focus-within:border-[var(--accent)] transition-colors">
+                              <span className="text-[var(--text-secondary)] text-xs font-semibold">₹</span>
+                              <input
+                                type="number"
+                                placeholder="0.00"
+                                min="0.01"
+                                step="0.01"
+                                value={quickExpenseForm.amount}
+                                onChange={(e) => setQuickExpenseForm({ ...quickExpenseForm, amount: e.target.value })}
+                                className="w-full py-2.5 px-2 text-xs outline-none bg-transparent font-bold"
+                                required
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Category</label>
+                            <select
+                              value={quickExpenseForm.category}
+                              onChange={(e) => setQuickExpenseForm({ ...quickExpenseForm, category: e.target.value as RealInvestmentCategory })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] text-xs rounded-xl py-3 px-3 outline-none"
+                            >
+                              {expenseCategories.map((category) => (
+                                <option key={category} value={category}>{category}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Note (optional)</label>
+                          <input
+                            type="text"
+                            placeholder="e.g. Flour from local market"
+                            value={quickExpenseForm.note}
+                            onChange={(e) => setQuickExpenseForm({ ...quickExpenseForm, note: e.target.value })}
+                            className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none"
+                          />
+                        </div>
+
+                        {/* Attach Bill — same signed-upload + direct-PUT
+                            flow as the menu item / profile photo uploads
+                            (category=INVESTMENT_RECEIPT). Uploads on select,
+                            not on submit, so the baker sees the thumbnail
+                            and any upload error before logging the expense. */}
+                        <div className="flex items-center gap-3">
+                          <div className="w-14 h-14 rounded-xl overflow-hidden bg-[var(--background)] border border-[var(--border)] flex items-center justify-center text-[var(--text-secondary)] shrink-0">
+                            {quickExpenseForm.receiptPhotoPreviewUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={quickExpenseForm.receiptPhotoPreviewUrl} alt="Bill" className="w-full h-full object-cover" />
+                            ) : (
+                              <Camera size={18} />
+                            )}
+                          </div>
+                          <label className="text-xs font-bold text-[var(--accent)] cursor-pointer hover:underline">
+                            {quickExpensePhotoUploading ? 'Uploading...' : quickExpenseForm.receiptPhotoPreviewUrl ? 'Replace Bill Photo' : 'Attach Bill'}
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp"
+                              capture="environment"
+                              className="hidden"
+                              disabled={quickExpensePhotoUploading}
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) handleQuickExpensePhotoUpload(file);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={logExpenseSubmitting || quickExpensePhotoUploading}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white text-xs font-bold py-3.5 rounded-xl transition-all shadow-sm flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
+                        >
+                          <Plus size={16} strokeWidth={2.5} /> {logExpenseSubmitting ? 'Logging...' : 'Log Purchase'}
+                        </button>
+                      </div>
+                      </form>
+                      )}
+                    </div>
 
                     {/* Recent purchases log (Right Column) — real GET /api/investments */}
                     <div className="lg:col-span-2 flex flex-col gap-3.5">
@@ -4684,15 +4893,28 @@ export default function Webapp() {
                           investmentsList.map((entry) => (
                             <div
                               key={entry.id}
-                              className="bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center"
+                              onClick={entry.receiptPhotoUrl ? () => setReceiptLightboxUrl(entry.receiptPhotoUrl) : undefined}
+                              className={`bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center ${entry.receiptPhotoUrl ? 'cursor-pointer' : ''}`}
                             >
                               <div>
                                 <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{entry.purchaseDate}</span>
                                 <h4 className="font-bold text-sm text-[var(--text-primary)] mt-1">{entry.materialName}</h4>
                                 <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{entry.quantity} {entry.unit} × ₹{entry.pricePerUnit}</p>
-                                <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full mt-2 uppercase tracking-wide">
-                                  {entry.category}
-                                </span>
+                                <div className="flex items-center gap-1.5 mt-2">
+                                  <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full uppercase tracking-wide">
+                                    {entry.category}
+                                  </span>
+                                  {entry.receiptPhotoUrl && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setReceiptLightboxUrl(entry.receiptPhotoUrl); }}
+                                      className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-50 dark:bg-[#1A0C06] text-orange-600 border border-orange-100 cursor-pointer"
+                                      aria-label="View receipt photo"
+                                    >
+                                      <Receipt size={11} />
+                                    </button>
+                                  )}
+                                </div>
                               </div>
 
                               <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
@@ -8145,6 +8367,36 @@ export default function Webapp() {
                         )}
                       </>
                     )}
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            {/* Receipt photo lightbox — opened by tapping a Recent Purchases
+                row/receipt icon that has a receiptPhotoUrl (Quick Total
+                expenses). Independent overlay, own state, not an
+                activeSheet value. */}
+            <AnimatePresence>
+              {receiptLightboxUrl && (
+                <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/90">
+                  <div className="absolute inset-0" onClick={() => setReceiptLightboxUrl(null)} />
+                  <button
+                    type="button"
+                    onClick={() => setReceiptLightboxUrl(null)}
+                    className="absolute top-4 right-4 z-10 p-2 rounded-full bg-white/10 text-white hover:bg-white/20 cursor-pointer"
+                    aria-label="Close"
+                  >
+                    <X size={22} />
+                  </button>
+                  <motion.div
+                    initial={{ scale: 0.95, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.95, opacity: 0 }}
+                    transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+                    className="relative z-0 max-w-full max-h-full"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={receiptLightboxUrl} alt="Receipt" className="max-w-full max-h-[85vh] object-contain rounded-lg" />
                   </motion.div>
                 </div>
               )}
