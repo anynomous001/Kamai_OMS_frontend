@@ -877,6 +877,64 @@ export default function Webapp() {
   // field and never clobbers a value the baker deliberately entered.
   const [newOrderAdvanceTouched, setNewOrderAdvanceTouched] = useState(false);
 
+  // Customer Name autocomplete (New Order form) — GET /api/customers?search=
+  // &page=1&limit=10, the same real endpoint/params the Customers tab
+  // already uses. customerSelected + customerSelectedPhone track whether
+  // the current name/phone came from picking an existing customer, so the
+  // "changing phone" caption only shows once they've actually edited it
+  // away from what was auto-filled. customerSearchSeq is a staleness guard
+  // (not a real AbortController — the shared api client doesn't expose a
+  // signal) so a slow earlier response can never clobber a faster later one.
+  const [customerDropdownOpen, setCustomerDropdownOpen] = useState(false);
+  const [customerSearchResults, setCustomerSearchResults] = useState<RealCustomerListItem[]>([]);
+  const [customerSearchLoading, setCustomerSearchLoading] = useState(false);
+  const [customerSelected, setCustomerSelected] = useState(false);
+  const [customerSelectedPhone, setCustomerSelectedPhone] = useState('');
+  const customerSearchSeq = useRef(0);
+
+  // Custom cake category/flavour ("+ Add your own") — New Order form.
+  const [customCakeCategoryMode, setCustomCakeCategoryMode] = useState(false);
+  const [customCakeFlavourMode, setCustomCakeFlavourMode] = useState(false);
+
+  // Debounced (300ms) customer search for the New Order form's autocomplete
+  // — only runs while the dropdown is open, mirrors the Customers tab's own
+  // GET /api/customers?search=&page=&limit= call. Under 2 characters clears
+  // results but leaves the dropdown (and its pinned "+ New Customer" row)
+  // open rather than searching.
+  useEffect(() => {
+    if (!customerDropdownOpen) return;
+    const query = newOrderForm.customerName.trim();
+    if (query.length < 2) {
+      setCustomerSearchResults([]);
+      setCustomerSearchLoading(false);
+      return;
+    }
+    setCustomerSearchLoading(true);
+    const seq = ++customerSearchSeq.current;
+    const handle = setTimeout(() => {
+      const params = new URLSearchParams();
+      params.set('search', query);
+      params.set('page', '1');
+      params.set('limit', '10');
+      api
+        .get<{ success: boolean; data: { customers: RealCustomerListItem[]; pagination: OrdersPagination } }>(
+          `/api/customers?${params.toString()}`,
+        )
+        .then((res) => {
+          if (customerSearchSeq.current !== seq) return; // superseded by a newer keystroke
+          setCustomerSearchResults(res.data.customers);
+        })
+        .catch(() => {
+          if (customerSearchSeq.current !== seq) return;
+          setCustomerSearchResults([]);
+        })
+        .finally(() => {
+          if (customerSearchSeq.current === seq) setCustomerSearchLoading(false);
+        });
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [newOrderForm.customerName, customerDropdownOpen]);
+
   // Edit Order form — reuses the New Order Form's field shape/UI, pre-filled
   // from the currently open Order Detail (GET /api/orders/:orderNumber)
   // instead of blank. PUT /api/orders/:orderNumber's UpdateOrderBodySchema
@@ -2606,6 +2664,16 @@ export default function Webapp() {
       setNewOrderError('Customer name is required.');
       return;
     }
+    // Only reachable with a blank value via "+ Add your own" — the preset
+    // dropdowns always carry a non-empty selection.
+    if (!newOrderForm.cakeCategory.trim()) {
+      setNewOrderError('Enter a cake category.');
+      return;
+    }
+    if (!newOrderForm.flavour.trim()) {
+      setNewOrderError('Enter a cake flavour.');
+      return;
+    }
     const total = parseFloat(newOrderForm.totalAmount);
     if (!total || total <= 0) {
       setNewOrderError('Total amount must be greater than ₹0.');
@@ -2672,6 +2740,12 @@ export default function Webapp() {
 
       setNewOrderForm(getDefaultNewOrderForm());
       setNewOrderAdvanceTouched(false);
+      setCustomerSelected(false);
+      setCustomerSelectedPhone('');
+      setCustomerDropdownOpen(false);
+      setCustomerSearchResults([]);
+      setCustomCakeCategoryMode(false);
+      setCustomCakeFlavourMode(false);
       setActiveSheet('none');
 
       // Real order now exists server-side — refresh every screen that
@@ -4812,7 +4886,7 @@ export default function Webapp() {
                         <div className="flex justify-between items-center mb-6">
                           <button type="button" onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
                           <h3 className="font-serif text-xl md:text-2xl font-bold">New Order</h3>
-                          <button type="reset" className="text-xs font-semibold text-[var(--text-secondary)] hover:underline cursor-pointer" onClick={() => { setNewOrderForm(getDefaultNewOrderForm()); setNewOrderAdvanceTouched(false); setNewOrderError(null); }}>Clear</button>
+                          <button type="reset" className="text-xs font-semibold text-[var(--text-secondary)] hover:underline cursor-pointer" onClick={() => { setNewOrderForm(getDefaultNewOrderForm()); setNewOrderAdvanceTouched(false); setNewOrderError(null); setCustomerSelected(false); setCustomerSelectedPhone(''); setCustomerDropdownOpen(false); setCustomerSearchResults([]); setCustomCakeCategoryMode(false); setCustomCakeFlavourMode(false); }}>Clear</button>
                         </div>
 
                         <div className="flex flex-col gap-6 overflow-y-auto pb-4">
@@ -4828,13 +4902,65 @@ export default function Webapp() {
                               👤 1. Customer Details
                             </h4>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-                              <input
-                                type="text"
-                                placeholder="Customer Name"
-                                value={newOrderForm.customerName}
-                                onChange={(e) => setNewOrderForm({ ...newOrderForm, customerName: e.target.value })}
-                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
-                              />
+                              <div className="relative">
+                                <input
+                                  type="text"
+                                  placeholder="Customer Name"
+                                  value={newOrderForm.customerName}
+                                  onFocus={() => setCustomerDropdownOpen(true)}
+                                  onBlur={() => setCustomerDropdownOpen(false)}
+                                  onChange={(e) => setNewOrderForm({ ...newOrderForm, customerName: e.target.value })}
+                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
+                                />
+                                {customerDropdownOpen && (
+                                  <div className="absolute z-20 top-full left-0 right-0 mt-1 bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-lg overflow-hidden max-h-64 overflow-y-auto">
+                                    <button
+                                      type="button"
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => {
+                                        setNewOrderForm({ ...newOrderForm, customerName: '', phone: '', address: '' });
+                                        setCustomerSelected(false);
+                                        setCustomerSelectedPhone('');
+                                        setCustomerDropdownOpen(false);
+                                      }}
+                                      className="w-full text-left px-4 py-2.5 text-xs font-bold text-[var(--accent)] hover:bg-orange-50 dark:hover:bg-orange-950/20 cursor-pointer flex items-center gap-1.5 border-b border-[var(--border)]"
+                                    >
+                                      <Plus size={13} /> New Customer
+                                    </button>
+
+                                    {customerSearchLoading && (
+                                      <div className="px-4 py-3 flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">
+                                        <span className="w-3 h-3 border-2 border-[var(--accent)]/30 border-t-[var(--accent)] rounded-full animate-spin" />
+                                        Searching…
+                                      </div>
+                                    )}
+
+                                    {!customerSearchLoading && newOrderForm.customerName.trim().length >= 2 && customerSearchResults.length === 0 && (
+                                      <p className="px-4 py-3 text-[11px] text-[var(--text-secondary)]">No matching customers.</p>
+                                    )}
+
+                                    {!customerSearchLoading && customerSearchResults.map((c) => (
+                                      <button
+                                        type="button"
+                                        key={c.customerId}
+                                        onMouseDown={(e) => e.preventDefault()}
+                                        onClick={() => {
+                                          setNewOrderForm({ ...newOrderForm, customerName: c.name, phone: c.phone || '', address: c.address || '' });
+                                          setCustomerSelected(true);
+                                          setCustomerSelectedPhone(c.phone || '');
+                                          setCustomerDropdownOpen(false);
+                                        }}
+                                        className="w-full text-left px-4 py-2.5 hover:bg-neutral-50 dark:hover:bg-neutral-900 cursor-pointer border-b border-[var(--border)] last:border-b-0"
+                                      >
+                                        <p className="text-xs font-bold text-[var(--text-primary)]">{c.name}</p>
+                                        <p className="text-[10.5px] text-[var(--text-secondary)] mt-0.5">
+                                          {c.phone || 'No phone'}{c.lastOrderDate ? ` • Last order: ${c.lastOrderDate}` : ''}
+                                        </p>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
                               <input
                                 type="tel"
                                 placeholder="WhatsApp Number (e.g. 98765 43210)"
@@ -4843,6 +4969,11 @@ export default function Webapp() {
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)]"
                               />
                             </div>
+                            {customerSelected && newOrderForm.phone.trim() !== customerSelectedPhone.trim() && (
+                              <p className="text-[10.5px] text-[var(--text-secondary)] mb-3 -mt-2">
+                                Changing the phone number will log this as a different customer.
+                              </p>
+                            )}
                             {!newOrderForm.customerName.trim() && !newOrderForm.phone.trim() && (
                               <p className="text-[11px] text-[var(--text-secondary)] mb-3 -mt-2">
                                 No name or phone — this will be logged as a walk-in sale.
@@ -4863,21 +4994,79 @@ export default function Webapp() {
                               🎂 2. Cake & Production Details
                             </h4>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-                              <select
-                                value={newOrderForm.cakeCategory}
-                                onChange={(e) => setNewOrderForm({ ...newOrderForm, cakeCategory: e.target.value })}
-                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
-                              >
-                                {CAKE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                              </select>
+                              {customCakeCategoryMode ? (
+                                <div className="flex gap-1.5">
+                                  <input
+                                    type="text"
+                                    autoFocus
+                                    placeholder="Enter cake category"
+                                    value={newOrderForm.cakeCategory}
+                                    onChange={(e) => setNewOrderForm({ ...newOrderForm, cakeCategory: e.target.value })}
+                                    className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none focus:border-[var(--accent)]"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => { setCustomCakeCategoryMode(false); setNewOrderForm({ ...newOrderForm, cakeCategory: CAKE_CATEGORIES[0] }); }}
+                                    className="shrink-0 px-2.5 rounded-xl border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                                    aria-label="Back to category list"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              ) : (
+                                <select
+                                  value={newOrderForm.cakeCategory}
+                                  onChange={(e) => {
+                                    if (e.target.value === '__custom__') {
+                                      setCustomCakeCategoryMode(true);
+                                      setNewOrderForm({ ...newOrderForm, cakeCategory: '' });
+                                    } else {
+                                      setNewOrderForm({ ...newOrderForm, cakeCategory: e.target.value });
+                                    }
+                                  }}
+                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
+                                >
+                                  {CAKE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                                  <option value="__custom__">+ Add your own</option>
+                                </select>
+                              )}
 
-                              <select
-                                value={newOrderForm.flavour}
-                                onChange={(e) => setNewOrderForm({ ...newOrderForm, flavour: e.target.value })}
-                                className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
-                              >
-                                {CAKE_FLAVOURS.map((f) => <option key={f} value={f}>{f}</option>)}
-                              </select>
+                              {customCakeFlavourMode ? (
+                                <div className="flex gap-1.5">
+                                  <input
+                                    type="text"
+                                    autoFocus
+                                    placeholder="Enter cake flavour"
+                                    value={newOrderForm.flavour}
+                                    onChange={(e) => setNewOrderForm({ ...newOrderForm, flavour: e.target.value })}
+                                    className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none focus:border-[var(--accent)]"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => { setCustomCakeFlavourMode(false); setNewOrderForm({ ...newOrderForm, flavour: CAKE_FLAVOURS[0] }); }}
+                                    className="shrink-0 px-2.5 rounded-xl border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                                    aria-label="Back to flavour list"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              ) : (
+                                <select
+                                  value={newOrderForm.flavour}
+                                  onChange={(e) => {
+                                    if (e.target.value === '__custom__') {
+                                      setCustomCakeFlavourMode(true);
+                                      setNewOrderForm({ ...newOrderForm, flavour: '' });
+                                    } else {
+                                      setNewOrderForm({ ...newOrderForm, flavour: e.target.value });
+                                    }
+                                  }}
+                                  className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-3 text-xs outline-none"
+                                >
+                                  {CAKE_FLAVOURS.map((f) => <option key={f} value={f}>{f}</option>)}
+                                  <option value="__custom__">+ Add your own</option>
+                                </select>
+                              )}
                             </div>
 
                             <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1.5 block">Weight (lb)</label>
