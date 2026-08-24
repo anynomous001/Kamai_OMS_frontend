@@ -183,6 +183,24 @@ function writeCustomCakeOptions(kind: 'Categories' | 'Flavours', bakerId: string
   }
 }
 
+// New/Edit Order forms track Delivery Charge as its own field, entered
+// after Total Amount — nothing folded it into the total, so both the
+// "Balance to Collect" shown on the form and the totalPrice actually sent
+// to the backend silently excluded it (the reported bug: delivery charge
+// "getting lost"). Adjusts totalAmount by the delta between the old and
+// new delivery charge whenever it changes (including going to/from '' when
+// toggling Pickup/Delivery), so the total stays in sync while the baker can
+// still freely edit it afterward — a later edit becomes the new base the
+// next delta is computed against.
+function applyDeliveryChargeDelta(totalAmount: string, oldCharge: string, newCharge: string): string {
+  const totalNum = parseFloat(totalAmount) || 0;
+  const oldNum = parseFloat(oldCharge) || 0;
+  const newNum = parseFloat(newCharge) || 0;
+  const adjusted = totalNum - oldNum + newNum;
+  if (adjusted === 0 && totalAmount.trim() === '') return '';
+  return String(adjusted);
+}
+
 // "1" -> "1 pc", "2" -> "2 pcs"; falls back to weight when quantity isn't
 // set (orders can be priced by weight instead of piece count — see cake.
 // weightInPounds in the order-detail payload). Neither present -> em dash.
@@ -5204,7 +5222,12 @@ export default function Webapp() {
                             <div className="flex gap-3">
                               <button
                                 type="button"
-                                onClick={() => setNewOrderForm({ ...newOrderForm, deliveryType: 'Pickup' })}
+                                onClick={() => setNewOrderForm({
+                                  ...newOrderForm,
+                                  deliveryType: 'Pickup',
+                                  deliveryCharge: '',
+                                  totalAmount: applyDeliveryChargeDelta(newOrderForm.totalAmount, newOrderForm.deliveryCharge, ''),
+                                })}
                                 className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${newOrderForm.deliveryType === 'Pickup'
                                   ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
                                   : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
@@ -5229,9 +5252,23 @@ export default function Webapp() {
                                 min="0"
                                 placeholder="Delivery Charge (₹, optional)"
                                 value={newOrderForm.deliveryCharge}
-                                onChange={(e) => setNewOrderForm({ ...newOrderForm, deliveryCharge: e.target.value })}
+                                onChange={(e) => {
+                                  const newCharge = e.target.value;
+                                  const totalAmount = applyDeliveryChargeDelta(newOrderForm.totalAmount, newOrderForm.deliveryCharge, newCharge);
+                                  const pct = bakerProfile?.payment.defaultAdvancePercentage;
+                                  const advanceAmount =
+                                    !newOrderAdvanceTouched && pct && totalAmount
+                                      ? String(Math.round((Number(totalAmount) * pct) / 100))
+                                      : newOrderForm.advanceAmount;
+                                  setNewOrderForm({ ...newOrderForm, deliveryCharge: newCharge, totalAmount, advanceAmount });
+                                }}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] mt-3"
                               />
+                            )}
+                            {newOrderForm.deliveryType === 'Delivery' && parseFloat(newOrderForm.deliveryCharge || '0') > 0 && (
+                              <p className="text-[10px] text-[var(--text-secondary)] mt-1.5">
+                                Delivery charge is included in Total Amount below.
+                              </p>
                             )}
                           </div>
 
@@ -5473,7 +5510,12 @@ export default function Webapp() {
                             <div className="flex gap-3">
                               <button
                                 type="button"
-                                onClick={() => setEditOrderForm({ ...editOrderForm, deliveryType: 'Pickup' })}
+                                onClick={() => setEditOrderForm({
+                                  ...editOrderForm,
+                                  deliveryType: 'Pickup',
+                                  deliveryCharge: '',
+                                  totalAmount: applyDeliveryChargeDelta(editOrderForm.totalAmount, editOrderForm.deliveryCharge, ''),
+                                })}
                                 className={`flex-1 py-3 text-xs font-bold rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer ${editOrderForm.deliveryType === 'Pickup'
                                   ? 'bg-orange-50 dark:bg-orange-950/20 border-[var(--accent)] text-[var(--accent)]'
                                   : 'bg-[var(--background)] border-[var(--border)] text-[var(--text-secondary)]'
@@ -5498,9 +5540,21 @@ export default function Webapp() {
                                 min="0"
                                 placeholder="Delivery Charge (₹, optional)"
                                 value={editOrderForm.deliveryCharge}
-                                onChange={(e) => setEditOrderForm({ ...editOrderForm, deliveryCharge: e.target.value })}
+                                onChange={(e) => {
+                                  const newCharge = e.target.value;
+                                  setEditOrderForm({
+                                    ...editOrderForm,
+                                    deliveryCharge: newCharge,
+                                    totalAmount: applyDeliveryChargeDelta(editOrderForm.totalAmount, editOrderForm.deliveryCharge, newCharge),
+                                  });
+                                }}
                                 className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-3 px-4 text-xs outline-none focus:border-[var(--accent)] mt-3"
                               />
+                            )}
+                            {editOrderForm.deliveryType === 'Delivery' && parseFloat(editOrderForm.deliveryCharge || '0') > 0 && (
+                              <p className="text-[10px] text-[var(--text-secondary)] mt-1.5">
+                                Delivery charge is included in Total Amount below.
+                              </p>
                             )}
                           </div>
 
