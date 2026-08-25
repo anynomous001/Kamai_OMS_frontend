@@ -3648,49 +3648,61 @@ export default function Webapp() {
                     <div className="grid grid-cols-2 gap-4">
 
                       {/* Card 1: Total Orders This Month — blue (volume/informational,
-                          matches the Confirmed order-status blue elsewhere in the app) */}
+                          matches the Confirmed order-status blue elsewhere in the app).
+                          No background panel behind the icon — just the bare icon
+                          itself, enlarged and low-opacity, as a subtle corner
+                          watermark sitting behind the copy. */}
                       <div
                         onClick={() => setActiveTab('orders')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Total Orders This Month</span>
-                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 border border-blue-100 dark:border-blue-900/40">
-                            <ClipboardList size={15} />
-                          </div>
-                        </div>
-                        <div className="mt-4">
+                        <ClipboardList size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-blue-500/20 dark:text-blue-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Total Orders This Month</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
-                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">{dashboardSummary?.metrics?.totalOrdersThisMonth ?? 0}</span>
+                            <>
+                              <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">{dashboardSummary?.metrics?.totalOrdersThisMonth ?? 0}</span>
+                              <div className="flex flex-wrap gap-1.5 mt-2">
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 border border-blue-100 dark:border-blue-900/40">
+                                  {dashboardSummary?.metrics?.confirmedOrdersCount ?? 0} Confirmed
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 border border-amber-100 dark:border-amber-900/40">
+                                  {dashboardSummary?.metrics?.pendingOrdersCount ?? 0} Pending
+                                </span>
+                              </div>
+                            </>
                           )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">
-                            {dashboardSummary?.metrics?.confirmedOrdersCount ?? 0} Confirmed · {dashboardSummary?.metrics?.pendingOrdersCount ?? 0} Pending
-                          </p>
                         </div>
                       </div>
 
                       {/* Card 2: Expected This Month — emerald (revenue coming in) */}
                       <div
                         onClick={() => setActiveTab('orders')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Expected This Month</span>
-                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/40">
-                            <IndianRupee size={15} />
-                          </div>
-                        </div>
-                        <div className="mt-4">
+                        <IndianRupee size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-emerald-500/20 dark:text-emerald-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Expected This Month</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
-                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">₹{(dashboardSummary?.metrics?.expectedRevenueThisMonth ?? 0).toLocaleString('en-IN')}</span>
+                            <>
+                              <span className="text-2xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">₹{(dashboardSummary?.metrics?.expectedRevenueThisMonth ?? 0).toLocaleString('en-IN')}</span>
+                              <div className="flex flex-wrap gap-1.5 mt-2">
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 border border-blue-100 dark:border-blue-900/40">
+                                  ₹{(dashboardSummary?.metrics?.confirmedRevenue ?? 0).toLocaleString('en-IN')} Confirmed
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/40">
+                                  ₹{(dashboardSummary?.metrics?.deliveredRevenue ?? 0).toLocaleString('en-IN')} Delivered
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-400 border border-rose-100 dark:border-rose-900/40">
+                                  ₹{(dashboardSummary?.metrics?.confirmedBalanceDue ?? 0).toLocaleString('en-IN')} Due
+                                </span>
+                              </div>
+                            </>
                           )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">
-                            ₹{(dashboardSummary?.metrics?.confirmedRevenue ?? 0).toLocaleString('en-IN')} Confirmed · ₹{(dashboardSummary?.metrics?.deliveredRevenue ?? 0).toLocaleString('en-IN')} Delivered · ₹{(dashboardSummary?.metrics?.confirmedBalanceDue ?? 0).toLocaleString('en-IN')} Due
-                          </p>
                         </div>
                       </div>
 
@@ -3698,15 +3710,11 @@ export default function Webapp() {
                           order-status color elsewhere in the app) */}
                       <div
                         onClick={() => setActiveTab('orders')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Pending Order Value</span>
-                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 border border-amber-100 dark:border-amber-900/40">
-                            <Clock size={15} />
-                          </div>
-                        </div>
-                        <div className="mt-4">
+                        <Clock size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-amber-500/20 dark:text-amber-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Pending Order Value</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
@@ -3720,15 +3728,11 @@ export default function Webapp() {
                           order-status color now that the old "Ready" status is gone) */}
                       <div
                         onClick={() => setActiveTab('expenses')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Invested This Month</span>
-                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-violet-50 dark:bg-violet-950/30 text-violet-600 dark:text-violet-400 border border-violet-100 dark:border-violet-900/40">
-                            <PiggyBank size={15} />
-                          </div>
-                        </div>
-                        <div className="mt-4">
+                        <PiggyBank size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-violet-500/20 dark:text-violet-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Invested This Month</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
