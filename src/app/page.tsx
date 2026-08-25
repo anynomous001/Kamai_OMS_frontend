@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import Script from 'next/script';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Home as HomeIcon, ClipboardList, Users, Calendar as CalendarIcon,
@@ -32,6 +33,28 @@ import type {
   Wholesaler, WholesaleProduct, WholesalerPolicies, WholesaleCart,
   PlaceOrderResponse, OrderStatusResponse, BakerOrderListItem, FulfilmentMode, OrderItem,
 } from '@/lib/marketplace/types';
+
+// Google Identity Services — loaded via the <Script> tag below, not an
+// npm package, so its shape isn't otherwise known to TypeScript. Typed
+// narrowly to just what this file actually calls.
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: {
+            client_id: string;
+            callback: (response: { credential: string }) => void;
+          }) => void;
+          renderButton: (
+            parent: HTMLElement,
+            options: { type: string; theme: string; size: string; shape: string; width?: string },
+          ) => void;
+        };
+      };
+    };
+  }
+}
 
 // --- REAL API RESPONSE SHAPES (per verified backend contract) ---
 interface DashboardTodayOrder {
@@ -587,6 +610,19 @@ export default function Webapp() {
   const [otpTimer, setOtpTimer] = useState(29);
   const [isVerifying, setIsVerifying] = useState(false);
 
+  // Google Sign-In — additive second login method, Baker side only. Email
+  // OTP above is completely unchanged; this is a fully independent entry
+  // point that happens to land on the same setStep('dashboard') on
+  // success. Only rendered when NEXT_PUBLIC_GOOGLE_CLIENT_ID is set
+  // (mirrors NEXT_PUBLIC_FEATURE_MARKETPLACE's pattern elsewhere in this
+  // file) — the credentials don't exist in every environment yet, and an
+  // unconfigured deployment must silently fall back to email-only rather
+  // than show a broken button.
+  const [googleScriptLoaded, setGoogleScriptLoaded] = useState(false);
+  const [googleSignInLoading, setGoogleSignInLoading] = useState(false);
+  const [googleSignInError, setGoogleSignInError] = useState('');
+  const googleButtonRef = useRef<HTMLDivElement | null>(null);
+
   // Navigation tabs
   // Home, Orders, Customers, Calendar, Supply, Settings, Expenses
   const [activeTab, setActiveTab] = useState<'home' | 'orders' | 'customers' | 'calendar' | 'supply' | 'settings' | 'expenses'>('home');
@@ -627,22 +663,33 @@ export default function Webapp() {
   // backend calls (caption text via the existing /notifications/whatsapp
   // endpoint keyed by the order's UUID `id`, then the branded PNG via the
   // new /receipt-image endpoint keyed by the display `orderId`) followed
-  // by a fetch of the resulting signed image URL. Deliberately skips the
-  // OS share sheet (navigator.share) and jumps straight to wa.me with the
-  // customer's own number (whatsappUrl is keyed off order.customer.phone
-  // server-side, see notifications.service.ts) — WhatsApp's deep-link API
-  // only supports prefilled text, not an attached file, so the receipt
-  // image still has to be downloaded and manually attached once the chat
-  // opens; this only removes the app-picker/contact-picker hunting.
+  // by a fetch of the resulting signed image URL. confirmReceiptShare
+  // below prefers the OS share sheet (navigator.share with the file
+  // attached) wherever the device/browser actually supports sharing files
+  // — the baker picks WhatsApp (or anything else) straight from there,
+  // image already attached, no manual step. That's most mobile browsers
+  // today; Web Share API's file support was still shaky when this was
+  // first built, which is why the original version skipped straight to
+  // wa.me. Desktop browsers mostly still can't share files this way, so
+  // they keep the old fallback: download the image and open wa.me with
+  // the customer's own number prefilled (whatsappUrl is keyed off
+  // order.customer.phone server-side, see notifications.service.ts) —
+  // WhatsApp Web's deep link only supports prefilled text, not an
+  // attached file, so the baker manually attaches the already-downloaded
+  // image once the chat opens.
   //
   // window.open() must run synchronously inside a live user-gesture —
-  // same constraint navigator.share() had — so this is a two-tap flow:
+  // same constraint navigator.share() has — so this is a two-tap flow:
   // the first tap fetches everything and stores it in receiptSharePayload;
   // a second, fresh tap triggers the download and window.open() with no
   // awaits before them.
   const [receiptSharing, setReceiptSharing] = useState(false);
   const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
   const [receiptShareSent, setReceiptShareSent] = useState(false);
+  // Which path confirmReceiptShare actually took, so the post-share banner
+  // wording matches what happened — only meaningful once receiptShareSent
+  // is true (see confirmReceiptShare below).
+  const [receiptShareUsedFallback, setReceiptShareUsedFallback] = useState(false);
   const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; whatsappUrl: string } | null>(null);
   // A fast double-tap on either button fires two click events before React
   // re-renders to disable/hide it — state alone doesn't close that window
@@ -685,6 +732,7 @@ export default function Webapp() {
     setOrderDetailError(null);
     setReceiptShareError(null);
     setReceiptShareSent(false);
+    setReceiptShareUsedFallback(false);
     setReceiptSharePayload(null);
     setActiveSheet('customer-profile');
     setOrderDetailLoading(true);
@@ -816,6 +864,30 @@ export default function Webapp() {
     if (!receiptSharePayload || receiptShareConfirmedRef.current) return;
     receiptShareConfirmedRef.current = true;
     const { file, whatsappUrl } = receiptSharePayload;
+
+    // navigator.canShare({ files }) is the real capability check — canShare
+    // existing doesn't guarantee file support, and some browsers implement
+    // share() for text/url but throw on files. Only take this path when
+    // both exist and canShare confirms this exact file is shareable.
+    if (
+      typeof navigator.share === 'function' &&
+      typeof navigator.canShare === 'function' &&
+      navigator.canShare({ files: [file] })
+    ) {
+      setReceiptShareUsedFallback(false);
+      // Fire-and-forget: a user backing out of the share sheet rejects
+      // this promise too, which isn't an error worth surfacing.
+      navigator.share({ files: [file], title: file.name }).catch(() => {});
+      setReceiptShareSent(true);
+      setReceiptSharePayload(null);
+      return;
+    }
+
+    // Fallback for browsers that can't share files (most desktop
+    // browsers): download the image and open WhatsApp with prefilled
+    // text; the baker manually attaches the already-downloaded image once
+    // the chat opens.
+    setReceiptShareUsedFallback(true);
     const downloadUrl = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = downloadUrl;
@@ -1256,6 +1328,7 @@ export default function Webapp() {
   const [investmentsPage, setInvestmentsPage] = useState(1);
   const [investmentsLoading, setInvestmentsLoading] = useState(false);
   const [investmentsError, setInvestmentsError] = useState<string | null>(null);
+  const [investmentDeletingId, setInvestmentDeletingId] = useState<string | null>(null);
   const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
   const [logExpenseSubmitting, setLogExpenseSubmitting] = useState(false);
   const [logExpenseError, setLogExpenseError] = useState<string | null>(null);
@@ -2691,6 +2764,52 @@ export default function Webapp() {
     }
   };
 
+  // Google Sign-In — receives the ID token from Google's own rendered
+  // button (never anything the client itself asserts about identity) and
+  // hands it to the new backend endpoint for real server-side
+  // verification. Response shape matches verify-email-otp's exactly
+  // (bakerId/isNew/message), so this reuses the identical post-login
+  // routing: just setStep('dashboard'). isNew isn't currently branched on
+  // by the OTP flow either (see handleVerifyOtp above) — no new routing
+  // logic is introduced here beyond what already exists.
+  const handleGoogleCredentialResponse = useCallback(async (response: { credential: string }) => {
+    setGoogleSignInLoading(true);
+    setGoogleSignInError('');
+    try {
+      await api.post('/api/auth/google', { idToken: response.credential });
+      setStep('dashboard');
+    } catch (err: any) {
+      setGoogleSignInError(err.message || 'Google sign-in failed. Please try again.');
+    } finally {
+      setGoogleSignInLoading(false);
+    }
+  }, []);
+
+  // Initializes Google Identity Services and renders its own button into
+  // googleButtonRef once both the GSI script has loaded and the login
+  // screen is actually showing. Google's own button (not a custom one) is
+  // required for its client-side flow to work reliably — a custom
+  // "Continue with Google" button calling `prompt()` directly is subject
+  // to Google's own One Tap suppression heuristics and is far less
+  // reliable than letting Google render and own its button.
+  useEffect(() => {
+    if (!googleScriptLoaded || step !== 'login') return;
+    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+    if (!clientId || !googleButtonRef.current || !window.google) return;
+
+    window.google.accounts.id.initialize({
+      client_id: clientId,
+      callback: (response) => { void handleGoogleCredentialResponse(response); },
+    });
+    window.google.accounts.id.renderButton(googleButtonRef.current, {
+      type: 'standard',
+      theme: 'outline',
+      size: 'large',
+      shape: 'pill',
+      width: '352',
+    });
+  }, [googleScriptLoaded, step, handleGoogleCredentialResponse]);
+
   const handleLogExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
@@ -2793,6 +2912,27 @@ export default function Webapp() {
       setLogExpenseError(err.message || 'Failed to log expense.');
     } finally {
       setLogExpenseSubmitting(false);
+    }
+  };
+
+  // Mirrors handleDeleteMenuItem — soft delete via DELETE
+  // /api/investments/:entryId (already live on the backend), then refetch
+  // rather than splice the local list so "Spent this Month" and pagination
+  // totals stay correct.
+  const handleDeleteInvestment = async (entry: RealInvestmentEntry) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    if (!window.confirm(`Delete "${entry.materialName}" (₹${entry.totalCost.toLocaleString('en-IN')})? This can't be undone.`)) return;
+
+    setInvestmentDeletingId(entry.id);
+    setInvestmentsError(null);
+    try {
+      await api.delete(`/api/investments/${entry.id}`);
+      fetchInvestments();
+      fetchMonthlySpend();
+    } catch (err: any) {
+      setInvestmentsError(err.message || 'Failed to delete expense.');
+    } finally {
+      setInvestmentDeletingId(null);
     }
   };
 
@@ -3090,6 +3230,17 @@ export default function Webapp() {
 
   return (
     <div className="min-h-screen w-full flex justify-center bg-zinc-100 dark:bg-zinc-950 transition-colors duration-300">
+      {/* Google Identity Services — loaded unconditionally (not inside the
+          login-view conditional) so it's fetched once and stays available
+          across step changes, e.g. returning to the login screen after a
+          logout. No-op if NEXT_PUBLIC_GOOGLE_CLIENT_ID is unset — the
+          render effect above checks that before ever touching
+          window.google. */}
+      <Script
+        src="https://accounts.google.com/gsi/client"
+        strategy="afterInteractive"
+        onLoad={() => setGoogleScriptLoaded(true)}
+      />
       <div className="noise-bg h-screen max-h-screen w-full max-w-[480px] flex flex-col bg-[var(--background)] shadow-2xl border-x border-[var(--border)] relative overflow-hidden">
 
             {/* SESSION BOOTSTRAP CHECK — avoids flashing the login screen while we ask the backend if the httpOnly cookie is still valid */}
@@ -3119,6 +3270,43 @@ export default function Webapp() {
                   <p className="text-center text-[14.5px] leading-relaxed text-[var(--text-secondary)] mb-10 max-w-xs">
                     Enter your email address to log in<br />or create your bakery&apos;s workspace.
                   </p>
+
+                  {/* Continue with Google — additive second login method,
+                      not a replacement. Only shown when configured; email
+                      OTP below works exactly as before either way. Uses
+                      Google's own rendered button (not a custom one) —
+                      see the render effect above for why. */}
+                  {process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID && (
+                    <div className="w-full mb-6 flex flex-col items-center">
+                      <div className="relative w-full flex justify-center">
+                        <div ref={googleButtonRef} className="w-full flex justify-center" />
+                        {/* Overlay directly on the button itself, not just a
+                            text line below it — Google's rendered button
+                            can't be restyled internally, so this is the
+                            actual click surface being covered/dimmed while
+                            the sign-in request is in flight, making it
+                            unambiguous the tap registered and something is
+                            happening, and blocking a second tap meanwhile. */}
+                        {googleSignInLoading && (
+                          <div className="absolute inset-0 flex items-center justify-center gap-2 rounded-full bg-[var(--surface)]/90 backdrop-blur-[1px] cursor-wait">
+                            <span className="w-4 h-4 border-2 border-[var(--text-secondary)]/30 border-t-[var(--text-secondary)] rounded-full animate-spin" />
+                            <span className="text-[12.5px] font-medium text-[var(--text-secondary)]">Signing you in…</span>
+                          </div>
+                        )}
+                      </div>
+                      {googleSignInError && (
+                        <div className="flex items-center gap-1.5 text-red-600 text-xs px-1 mt-2">
+                          <AlertCircle size={14} />
+                          <span>{googleSignInError}</span>
+                        </div>
+                      )}
+                      <div className="w-full flex items-center gap-3 mt-6">
+                        <div className="flex-1 h-px bg-[var(--border)]" />
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-secondary)]">or</span>
+                        <div className="flex-1 h-px bg-[var(--border)]" />
+                      </div>
+                    </div>
+                  )}
 
                   <div className="w-full mb-6">
                     <div className="flex border border-[var(--border)] rounded-2xl bg-[var(--surface)] overflow-hidden focus-within:border-[var(--accent)] transition-all h-[56px] items-center px-4 gap-3">
@@ -4917,7 +5105,18 @@ export default function Webapp() {
                                 </div>
                               </div>
 
-                              <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); handleDeleteInvestment(entry); }}
+                                  disabled={investmentDeletingId === entry.id}
+                                  className="p-1.5 text-[var(--text-secondary)] hover:text-red-600 disabled:opacity-40 rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                  aria-label="Delete expense"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
                             </div>
                           ))}
                       </div>
@@ -6044,7 +6243,11 @@ export default function Webapp() {
                                 )}
                                 {receiptShareSent && (
                                   <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200/50 text-blue-700 dark:text-blue-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
-                                    <Download size={12} /> Image downloaded — attach it in the WhatsApp chat that just opened.
+                                    {receiptShareUsedFallback ? (
+                                      <><Download size={12} /> Image downloaded — attach it in the WhatsApp chat that just opened.</>
+                                    ) : (
+                                      <><Share2 size={12} /> Receipt sent to the share sheet — pick WhatsApp to send it.</>
+                                    )}
                                   </div>
                                 )}
                                 {receiptShareError && (
