@@ -3647,14 +3647,17 @@ export default function Webapp() {
                         old 4 KPI cards + "This Month, In Detail" section. */}
                     <div className="grid grid-cols-2 gap-4">
 
-                      {/* Card 1: Total Orders This Month */}
+                      {/* Card 1: Total Orders This Month — blue (volume/informational,
+                          matches the Confirmed order-status blue elsewhere in the app) */}
                       <div
                         onClick={() => setActiveTab('orders')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Total Orders This Month</span>
-                          <ClipboardList size={16} className="text-[var(--accent)]" />
+                        <div className="flex items-center justify-between">
+                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Total Orders This Month</span>
+                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 border border-blue-100 dark:border-blue-900/40">
+                            <ClipboardList size={15} />
+                          </div>
                         </div>
                         <div className="mt-4">
                           {dashboardLoading ? (
@@ -3668,14 +3671,16 @@ export default function Webapp() {
                         </div>
                       </div>
 
-                      {/* Card 2: Expected This Month */}
+                      {/* Card 2: Expected This Month — emerald (revenue coming in) */}
                       <div
                         onClick={() => setActiveTab('orders')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Expected This Month</span>
-                          <IndianRupee size={16} className="text-[var(--accent)]" />
+                        <div className="flex items-center justify-between">
+                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Expected This Month</span>
+                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/40">
+                            <IndianRupee size={15} />
+                          </div>
                         </div>
                         <div className="mt-4">
                           {dashboardLoading ? (
@@ -3689,14 +3694,17 @@ export default function Webapp() {
                         </div>
                       </div>
 
-                      {/* Card 3: Pending Order Value */}
+                      {/* Card 3: Pending Order Value — amber (matches the Pending
+                          order-status color elsewhere in the app) */}
                       <div
                         onClick={() => setActiveTab('orders')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Pending Order Value</span>
-                          <Clock size={16} className="text-[var(--accent)]" />
+                        <div className="flex items-center justify-between">
+                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Pending Order Value</span>
+                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 border border-amber-100 dark:border-amber-900/40">
+                            <Clock size={15} />
+                          </div>
                         </div>
                         <div className="mt-4">
                           {dashboardLoading ? (
@@ -3707,14 +3715,18 @@ export default function Webapp() {
                         </div>
                       </div>
 
-                      {/* Card 4: Invested This Month */}
+                      {/* Card 4: Invested This Month — violet (money going out;
+                          distinct from the other three, no longer reused by any
+                          order-status color now that the old "Ready" status is gone) */}
                       <div
                         onClick={() => setActiveTab('expenses')}
                         className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Invested This Month</span>
-                          <PiggyBank size={16} className="text-[var(--accent)]" />
+                        <div className="flex items-center justify-between">
+                          <span className="text-[var(--text-secondary)] text-xs font-semibold">Invested This Month</span>
+                          <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center bg-violet-50 dark:bg-violet-950/30 text-violet-600 dark:text-violet-400 border border-violet-100 dark:border-violet-900/40">
+                            <PiggyBank size={15} />
+                          </div>
                         </div>
                         <div className="mt-4">
                           {dashboardLoading ? (
