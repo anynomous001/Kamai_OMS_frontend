@@ -9,8 +9,15 @@ import '@testing-library/jest-dom/vitest';
  * popup/consent screen and real account cannot be driven through
  * automation (nor should they be) — every scenario here mocks the
  * network boundary (`@/lib/api`, `@/lib/auth`) and simulates Google's
- * Identity Services callback directly via a captured `window.google`
- * mock, never a real script load or real credential.
+ * Identity Services callback directly via a `window.google` mock, never
+ * a real script load or real credential.
+ *
+ * page.tsx's render effect polls for `window.google.accounts.id`
+ * directly (see that effect's own comment for why — trusting
+ * next/script's `onLoad` alone turned out not to be reliable enough in
+ * production) rather than reacting to a script "loaded" event, so these
+ * tests simulate script availability by setting/removing `window.google`
+ * itself, not by firing a captured onLoad callback.
  *
  * page.tsx exports one large client component (`Webapp`) containing the
  * whole app's state machine, including the login screen — there's no
@@ -19,22 +26,12 @@ import '@testing-library/jest-dom/vitest';
  * hit it via a browser, with the network layer swapped out.
  */
 
-// `vi.mock` factories are hoisted above imports, so any mutable state
-// they close over must be created via `vi.hoisted` — this is what lets
-// each test control what next/script's onLoad and window.google's
-// captured callback resolve to.
-const { capturedScriptOnLoad } = vi.hoisted(() => ({
-  capturedScriptOnLoad: { current: null as null | (() => void) },
-}));
-
 vi.mock('next/script', () => ({
-  // Captures onLoad instead of firing it automatically — each test
-  // decides whether/when "the script loaded" by invoking it, including
-  // never (scenario 6: the script fails to load).
-  default: (props: { onLoad?: () => void }) => {
-    capturedScriptOnLoad.current = props.onLoad ?? null;
-    return null;
-  },
+  // next/script would otherwise try to inject a real <script> tag; jsdom
+  // won't execute its cross-origin src anyway, but mocking it to a no-op
+  // keeps these tests from depending on that at all — every scenario
+  // controls "is Google's API available" via window.google directly.
+  default: () => null,
 }));
 
 vi.mock('@/lib/auth', () => ({
@@ -62,7 +59,7 @@ import { api } from '@/lib/api';
 // point for every happy/error-path test below.
 let capturedGoogleCallback: ((response: { credential: string }) => void) | null;
 
-function mockGoogleIdentityServices() {
+function mockGoogleIdentityServicesAvailable() {
   capturedGoogleCallback = null;
   (window as unknown as { google: unknown }).google = {
     accounts: {
@@ -81,6 +78,11 @@ function mockGoogleIdentityServices() {
   };
 }
 
+function mockGoogleIdentityServicesUnavailable() {
+  capturedGoogleCallback = null;
+  delete (window as unknown as { google?: unknown }).google;
+}
+
 async function renderLoginScreen() {
   render(<Webapp />);
   // checkSession() resolves async; wait for the bootstrap check to clear
@@ -91,8 +93,7 @@ async function renderLoginScreen() {
 describe('Login screen — Google Sign-In wiring', () => {
   beforeEach(() => {
     vi.stubEnv('NEXT_PUBLIC_GOOGLE_CLIENT_ID', 'test-client-id.apps.googleusercontent.com');
-    capturedScriptOnLoad.current = null;
-    mockGoogleIdentityServices();
+    mockGoogleIdentityServicesAvailable();
     vi.mocked(api.post).mockReset();
     vi.mocked(api.get).mockReset().mockRejectedValue(new Error('not mocked in this test'));
   });
@@ -100,11 +101,11 @@ describe('Login screen — Google Sign-In wiring', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    delete (window as unknown as { google?: unknown }).google;
   });
 
   it('renders the Google button and container alongside the unchanged OTP form', async () => {
     await renderLoginScreen();
-    capturedScriptOnLoad.current?.();
 
     await waitFor(() => {
       expect(screen.getByText('Sign in with Google')).toBeInTheDocument();
@@ -125,7 +126,6 @@ describe('Login screen — Google Sign-In wiring', () => {
     });
 
     await renderLoginScreen();
-    capturedScriptOnLoad.current?.();
     await waitFor(() => expect(capturedGoogleCallback).not.toBeNull());
 
     capturedGoogleCallback!({ credential: 'fake-google-id-token' });
@@ -146,7 +146,6 @@ describe('Login screen — Google Sign-In wiring', () => {
     vi.mocked(api.post).mockRejectedValueOnce(new Error('Invalid or expired Google sign-in token.'));
 
     await renderLoginScreen();
-    capturedScriptOnLoad.current?.();
     await waitFor(() => expect(capturedGoogleCallback).not.toBeNull());
 
     capturedGoogleCallback!({ credential: 'garbage' });
@@ -164,7 +163,6 @@ describe('Login screen — Google Sign-In wiring', () => {
     vi.mocked(api.post).mockRejectedValueOnce(new Error(suspendedMessage));
 
     await renderLoginScreen();
-    capturedScriptOnLoad.current?.();
     await waitFor(() => expect(capturedGoogleCallback).not.toBeNull());
 
     capturedGoogleCallback!({ credential: 'fake-google-id-token' });
@@ -179,7 +177,6 @@ describe('Login screen — Google Sign-In wiring', () => {
     vi.mocked(api.post).mockRejectedValueOnce(new Error('Google sign-in is not configured.'));
 
     await renderLoginScreen();
-    capturedScriptOnLoad.current?.();
     await waitFor(() => expect(capturedGoogleCallback).not.toBeNull());
 
     capturedGoogleCallback!({ credential: 'fake-google-id-token' });
@@ -190,18 +187,19 @@ describe('Login screen — Google Sign-In wiring', () => {
     expect(screen.getByRole('button', { name: /send verification code/i })).toBeInTheDocument();
   });
 
-  it("Google's script failing to load never breaks the page — email OTP stays fully usable", async () => {
-    await renderLoginScreen();
-    // Deliberately never invoke capturedScriptOnLoad.current — simulates
-    // accounts.google.com/gsi/client being blocked/failing to load.
+  it("Google's script/API never becoming available never breaks the page — email OTP stays fully usable", async () => {
+    mockGoogleIdentityServicesUnavailable();
 
-    // No Google button ever appears...
+    await renderLoginScreen();
+
+    // Give the poll loop several cycles to (not) find anything — this is
+    // deterministic, not a race: with window.google absent, it can never
+    // succeed no matter how long we wait.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // No Google button ever appears, and nothing crashed trying...
     expect(screen.queryByText('Sign in with Google')).not.toBeInTheDocument();
-    // ...google.accounts.id was never touched (nothing crashed trying)...
-    expect((window as unknown as { google: unknown }).google).toMatchObject({
-      accounts: { id: { initialize: expect.any(Function) } },
-    });
-    expect(vi.mocked((window as any).google.accounts.id.initialize)).not.toHaveBeenCalled();
+    expect((window as unknown as { google?: unknown }).google).toBeUndefined();
     // ...and the email OTP flow is completely unaffected.
     expect(screen.getByPlaceholderText('Enter your email address')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /send verification code/i })).toBeInTheDocument();
@@ -212,7 +210,6 @@ describe('Login screen — Google Sign-In wiring', () => {
     vi.stubEnv('NEXT_PUBLIC_GOOGLE_CLIENT_ID', '');
 
     await renderLoginScreen();
-    capturedScriptOnLoad.current?.();
 
     expect(screen.queryByText('Sign in with Google')).not.toBeInTheDocument();
     expect(screen.queryByText('or')).not.toBeInTheDocument();

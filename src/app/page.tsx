@@ -618,7 +618,6 @@ export default function Webapp() {
   // file) — the credentials don't exist in every environment yet, and an
   // unconfigured deployment must silently fall back to email-only rather
   // than show a broken button.
-  const [googleScriptLoaded, setGoogleScriptLoaded] = useState(false);
   const [googleSignInLoading, setGoogleSignInLoading] = useState(false);
   const [googleSignInError, setGoogleSignInError] = useState('');
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
@@ -2786,29 +2785,55 @@ export default function Webapp() {
   }, []);
 
   // Initializes Google Identity Services and renders its own button into
-  // googleButtonRef once both the GSI script has loaded and the login
-  // screen is actually showing. Google's own button (not a custom one) is
-  // required for its client-side flow to work reliably — a custom
-  // "Continue with Google" button calling `prompt()` directly is subject
-  // to Google's own One Tap suppression heuristics and is far less
-  // reliable than letting Google render and own its button.
+  // googleButtonRef once the login screen is actually showing. Google's
+  // own button (not a custom one) is required for its client-side flow to
+  // work reliably — a custom "Continue with Google" button calling
+  // `prompt()` directly is subject to Google's own One Tap suppression
+  // heuristics and is far less reliable than letting Google render and
+  // own its button.
+  //
+  // Deliberately polls for window.google.accounts.id instead of trusting
+  // next/script's onLoad callback — in
+  // production, onLoad firing turned out not to be reliable enough on its
+  // own (observed: the GSI script demonstrably loads — network 200,
+  // window.google populated within a couple seconds — yet onLoad's
+  // resulting effect run never fired, leaving the button container
+  // permanently empty on an otherwise-working page/origin; manually
+  // calling initialize/renderButton from the console worked immediately).
+  // Polling on the actual condition that matters (is the API object
+  // there yet) sidesteps whatever specific onLoad-timing quirk that is.
   useEffect(() => {
-    if (!googleScriptLoaded || step !== 'login') return;
+    if (step !== 'login') return;
     const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-    if (!clientId || !googleButtonRef.current || !window.google) return;
+    if (!clientId) return;
 
-    window.google.accounts.id.initialize({
-      client_id: clientId,
-      callback: (response) => { void handleGoogleCredentialResponse(response); },
-    });
-    window.google.accounts.id.renderButton(googleButtonRef.current, {
-      type: 'standard',
-      theme: 'outline',
-      size: 'large',
-      shape: 'pill',
-      width: '352',
-    });
-  }, [googleScriptLoaded, step, handleGoogleCredentialResponse]);
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 50; // ~5s at 100ms — generous for a script that's usually ready in well under 1s
+
+    const tryRender = () => {
+      if (cancelled) return;
+      if (googleButtonRef.current && window.google?.accounts?.id) {
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          callback: (response) => { void handleGoogleCredentialResponse(response); },
+        });
+        window.google.accounts.id.renderButton(googleButtonRef.current, {
+          type: 'standard',
+          theme: 'outline',
+          size: 'large',
+          shape: 'pill',
+          width: '352',
+        });
+        return;
+      }
+      attempts += 1;
+      if (attempts < MAX_ATTEMPTS) setTimeout(tryRender, 100);
+    };
+
+    tryRender();
+    return () => { cancelled = true; };
+  }, [step, handleGoogleCredentialResponse]);
 
   const handleLogExpense = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -3235,12 +3260,10 @@ export default function Webapp() {
           across step changes, e.g. returning to the login screen after a
           logout. No-op if NEXT_PUBLIC_GOOGLE_CLIENT_ID is unset — the
           render effect above checks that before ever touching
-          window.google. */}
-      <Script
-        src="https://accounts.google.com/gsi/client"
-        strategy="afterInteractive"
-        onLoad={() => setGoogleScriptLoaded(true)}
-      />
+          window.google. No onLoad prop: the render effect polls for
+          window.google.accounts.id directly instead of trusting this
+          fires (see that effect's comment for why). */}
+      <Script src="https://accounts.google.com/gsi/client" strategy="afterInteractive" />
       <div className="noise-bg h-screen max-h-screen w-full max-w-[480px] flex flex-col bg-[var(--background)] shadow-2xl border-x border-[var(--border)] relative overflow-hidden">
 
             {/* SESSION BOOTSTRAP CHECK — avoids flashing the login screen while we ask the backend if the httpOnly cookie is still valid */}
