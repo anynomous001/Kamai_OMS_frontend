@@ -110,11 +110,15 @@ interface DashboardSummary {
   };
 }
 
-// Real order-list status vocabulary (Pending/Confirmed/In Progress/Ready/
-// Delivered/Cancelled) — distinct from the mock Order['status'] type still
-// used elsewhere until those screens are wired.
-type RealOrderStatus = 'Pending' | 'Confirmed' | 'In Progress' | 'Ready' | 'Delivered' | 'Cancelled';
-const ALL_ORDER_STATUSES: RealOrderStatus[] = ['Pending', 'Confirmed', 'In Progress', 'Ready', 'Delivered', 'Cancelled'];
+// Real order-list status vocabulary — simplified lifecycle (2026-08):
+// Pending -> Confirmed -> Delivered, with Cancelled reachable as an
+// exception from either Pending or Confirmed. The old 6-state pipeline
+// (In Progress/Ready as intermediate production stages) was collapsed to
+// this on the backend (status-validation.service.ts) — kept in sync here.
+// Distinct from the mock Order['status'] type still used elsewhere until
+// those screens are wired.
+type RealOrderStatus = 'Pending' | 'Confirmed' | 'Delivered' | 'Cancelled';
+const ALL_ORDER_STATUSES: RealOrderStatus[] = ['Pending', 'Confirmed', 'Delivered', 'Cancelled'];
 
 // Orders-list quick-filter chips — distinct from RealOrderStatus because two
 // of these ('DeliveredThisMonth', 'Recent') aren't a single status value,
@@ -161,14 +165,10 @@ function derivePaymentStatus(totalPrice: number, balanceDue: number): PaymentSta
 
 // orderStatus color palette — shared by day-cell order chips, order-card
 // status pills, the orders-list badge, and the interactive status selector
-// on Order Detail, so all four stay visually consistent. Updated for the
-// Aug 2026 status-editing spec (Confirmed=blue, In Progress=brand orange
-// #EA580C, Ready=purple, Delivered=green); Pending/Cancelled unchanged.
+// on Order Detail, so all four stay visually consistent.
 const ORDER_STATUS_COLORS: Record<RealOrderStatus, string> = {
   Pending: '#FFC107',
   Confirmed: '#2196F3',
-  'In Progress': '#EA580C',
-  Ready: '#8B5CF6',
   Delivered: '#4CAF50',
   Cancelled: '#9E9E9E',
 };
@@ -406,8 +406,6 @@ interface RealCalendarDay {
   totalOrders: number;
   pending: number;
   confirmed: number;
-  inProgress: number;
-  ready: number;
   delivered: number;
   outstandingBalance: number;
 }
@@ -1168,7 +1166,7 @@ export default function Webapp() {
   const confirmPendingStatusChange = () => {
     if (!pendingStatusConfirm) return;
     const { orderNumber, newStatus } = pendingStatusConfirm;
-    const previousStatus = selectedOrderDetail?.orderId === orderNumber ? (selectedOrderDetail.status as RealOrderStatus) : 'Ready';
+    const previousStatus = selectedOrderDetail?.orderId === orderNumber ? (selectedOrderDetail.status as RealOrderStatus) : 'Confirmed';
     setPendingStatusConfirm(null);
     applyOrderStatusChange(orderNumber, newStatus, previousStatus);
   };
@@ -3994,9 +3992,7 @@ export default function Webapp() {
                               <div className="flex justify-between items-center pt-4 mt-4 border-t border-[var(--border)]/50 gap-2 flex-wrap">
                                 <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10.5px] font-bold ${o.status === 'Pending' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border border-[var(--border)]' :
                                   o.status === 'Confirmed' ? 'bg-blue-50 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 border border-blue-200/50' :
-                                    o.status === 'In Progress' ? 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50' :
-                                      o.status === 'Ready' ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/50' :
-                                        o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
+                                    o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
                                           'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400'
                                   }`}>
                                   <span className="w-1.5 h-1.5 bg-current rounded-full"></span>
