@@ -629,7 +629,8 @@ export default function Webapp() {
     'none' | 'new-order' | 'edit-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
     'subscription-status' | 'help-support' |
-    'my-menu' | 'add-edit-menu-item' | 'share-menu' | 'supply-catalogue' | 'supply-cart' | 'supply-orders'
+    'my-menu' | 'add-edit-menu-item' | 'share-menu' | 'supply-catalogue' | 'supply-cart' | 'supply-orders' |
+    'expense-history'
   >('none');
 
   // Business state — bakeryName/ownerName/phoneNumber/upiId/fssaiLicense/
@@ -1320,13 +1321,27 @@ export default function Webapp() {
     purchaseDate: new Date().toISOString().slice(0, 10),
     supplierName: '',
   });
+  // "Recent Purchases" on the Expenses tab itself is intentionally capped
+  // at the 5 most recent entries (RECENT_INVESTMENTS_LIMIT below) — like a
+  // bank statement's account summary, not the full transaction history.
+  // "View All" opens the expense-history sheet below, which has its own
+  // independent, fully paginated list/state (historyList etc.).
   const [investmentsList, setInvestmentsList] = useState<RealInvestmentEntry[]>([]);
   const [investmentsPagination, setInvestmentsPagination] = useState<OrdersPagination | null>(null);
-  const [investmentsPage, setInvestmentsPage] = useState(1);
   const [investmentsLoading, setInvestmentsLoading] = useState(false);
   const [investmentsError, setInvestmentsError] = useState<string | null>(null);
   const [investmentDeletingId, setInvestmentDeletingId] = useState<string | null>(null);
   const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
+
+  // Full expense history sheet — opened via "View All" on Recent
+  // Purchases. Separate list/pagination state from the recent-5 list
+  // above so browsing/paginating history never disturbs what's shown on
+  // the main Expenses tab.
+  const [historyList, setHistoryList] = useState<RealInvestmentEntry[]>([]);
+  const [historyPagination, setHistoryPagination] = useState<OrdersPagination | null>(null);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [logExpenseSubmitting, setLogExpenseSubmitting] = useState(false);
   const [logExpenseError, setLogExpenseError] = useState<string | null>(null);
 
@@ -1848,6 +1863,40 @@ export default function Webapp() {
   const [calendarMonthsOverview, setCalendarMonthsOverview] = useState<RealCalendarMonthOverview[]>([]);
   const [calendarMonthsOverviewLoading, setCalendarMonthsOverviewLoading] = useState(false);
 
+  // Month-picker strip's own custom scrollbar — replaces the plain static
+  // divider that used to sit under it with a thin track+thumb indicator
+  // that actually reflects scroll position, since the native scrollbar is
+  // hidden (no-scrollbar) for the pill-strip look. thumbWidthPct is the
+  // viewport-to-content ratio (how much of the strip is visible at once);
+  // thumbLeftPct is the thumb's position within the track, both computed
+  // from the same scrollLeft/scrollWidth/clientWidth math a native
+  // scrollbar uses internally.
+  const monthStripRef = useRef<HTMLDivElement | null>(null);
+  const [monthStripScrollThumb, setMonthStripScrollThumb] = useState({ widthPct: 100, leftPct: 0 });
+
+  const updateMonthStripScrollThumb = useCallback(() => {
+    const el = monthStripRef.current;
+    if (!el) return;
+    const { scrollLeft, scrollWidth, clientWidth } = el;
+    if (scrollWidth <= clientWidth) {
+      setMonthStripScrollThumb({ widthPct: 100, leftPct: 0 });
+      return;
+    }
+    // Floored at 15% so the thumb never shrinks to an unnoticeable sliver
+    // on a strip with many months — matches how most custom scrollbar
+    // implementations keep a minimum-tappable/visible thumb size.
+    const widthPct = Math.max((clientWidth / scrollWidth) * 100, 15);
+    const scrollableDistance = scrollWidth - clientWidth;
+    const leftPct = scrollableDistance > 0 ? (scrollLeft / scrollableDistance) * (100 - widthPct) : 0;
+    setMonthStripScrollThumb({ widthPct, leftPct });
+  }, []);
+
+  // Recompute whenever the strip's content changes (new months loaded) —
+  // scrollWidth isn't known until the pills actually render.
+  useEffect(() => {
+    updateMonthStripScrollThumb();
+  }, [calendarMonthsOverview, updateMonthStripScrollThumb]);
+
   // Bootstrap: the session lives in an httpOnly cookie the browser already
   // holds after a successful login, so on load we ask the backend whether
   // it's still valid rather than defaulting to the login screen every time.
@@ -2142,13 +2191,16 @@ export default function Webapp() {
     setCustomersPage(1);
   }, [customerSearch]);
 
-  // Real investments/expense ledger (GET /api/investments)
+  // Real investments/expense ledger (GET /api/investments) — Recent
+  // Purchases always shows just the 5 most recent (page 1, limit 5); the
+  // full history lives in its own sheet/fetch below.
+  const RECENT_INVESTMENTS_LIMIT = 5;
   const fetchInvestments = useCallback(() => {
     setInvestmentsLoading(true);
     setInvestmentsError(null);
     const params = new URLSearchParams();
-    params.set('page', String(investmentsPage));
-    params.set('limit', '10');
+    params.set('page', '1');
+    params.set('limit', String(RECENT_INVESTMENTS_LIMIT));
     api
       .get<{ success: boolean; data: { entries: RealInvestmentEntry[]; pagination: OrdersPagination } }>(
         `/api/investments?${params.toString()}`,
@@ -2159,8 +2211,41 @@ export default function Webapp() {
       })
       .catch((err: any) => setInvestmentsError(err.message || 'Failed to load expenses.'))
       .finally(() => setInvestmentsLoading(false));
+  }, []);
+
+  // Full expense history (GET /api/investments), paginated independently
+  // of the recent-5 list — backs the "expense-history" sheet opened via
+  // Recent Purchases' "View All".
+  const fetchExpenseHistory = useCallback(() => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    const params = new URLSearchParams();
+    params.set('page', String(historyPage));
+    params.set('limit', '20');
+    api
+      .get<{ success: boolean; data: { entries: RealInvestmentEntry[]; pagination: OrdersPagination } }>(
+        `/api/investments?${params.toString()}`,
+      )
+      .then((res) => {
+        setHistoryList(res.data.entries);
+        setHistoryPagination(res.data.pagination);
+      })
+      .catch((err: any) => setHistoryError(err.message || 'Failed to load expense history.'))
+      .finally(() => setHistoryLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [investmentsPage]);
+  }, [historyPage]);
+
+  const openExpenseHistory = useCallback(() => {
+    setHistoryPage(1);
+    setActiveSheet('expense-history');
+  }, []);
+
+  useEffect(() => {
+    if (activeSheet === 'expense-history') {
+      fetchExpenseHistory();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSheet, historyPage]);
 
   // "Spent this Month" — a separate lightweight query scoped to the
   // current calendar month (from/to), since the main list above is
@@ -2183,7 +2268,7 @@ export default function Webapp() {
       fetchMonthlySpend();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, activeTab, investmentsPage]);
+  }, [step, activeTab]);
 
   // Finance Analytics — revenue/expenses/profit + order-count trend, always
   // the trailing 6 months (charts 1 & 3 share this one fetch/window).
@@ -2952,6 +3037,10 @@ export default function Webapp() {
       await api.delete(`/api/investments/${entry.id}`);
       fetchInvestments();
       fetchMonthlySpend();
+      // The entry being deleted may be visible in the full-history sheet
+      // (opened separately from Recent Purchases) rather than the recent-5
+      // list — keep both in sync if history is currently open.
+      if (activeSheet === 'expense-history') fetchExpenseHistory();
     } catch (err: any) {
       setInvestmentsError(err.message || 'Failed to delete expense.');
     } finally {
@@ -4250,8 +4339,16 @@ export default function Webapp() {
                         chips from calendarOrdersByDate (the whole-month
                         GET /api/orders fetch, grouped by date), not from
                         GET /api/dashboard/calendar (which only carries
-                        per-day aggregate counts). */}
-                    <div className="bg-[var(--surface)] rounded-[28px] border border-[var(--border)] p-5 shadow-sm w-full flex flex-col items-center">
+                        per-day aggregate counts).
+
+                        Bleeds full-bleed edge-to-edge of the phone-width
+                        shell via -mx-4 (cancelling out <main>'s px-4) and
+                        rounded-none, rather than the rounded/inset card
+                        treatment every other section uses — the day grid
+                        needs the extra ~32px of width far more than it
+                        needs a matching card border, and this only affects
+                        Calendar, not the rest of the app's layout. */}
+                    <div className="-mx-4 w-[calc(100%+2rem)] bg-[var(--surface)] border-y border-[var(--border)] p-3 shadow-sm flex flex-col items-center">
 
                       {/* Month title + stats + "back to today" */}
                       <div className="w-full flex flex-col items-center mb-4 text-center">
@@ -4284,8 +4381,20 @@ export default function Webapp() {
                           scrollable; tapping a pill re-centers the window
                           on that month, so tapping the edge pill repeatedly
                           walks further back/forward without needing
-                          separate prev/next arrows. */}
-                      <div className="w-full flex gap-2 overflow-x-auto no-scrollbar pb-4 mb-4 border-b border-[var(--border)]/60 -mx-1 px-1">
+                          separate prev/next arrows.
+
+                          The native scrollbar stays hidden (no-scrollbar)
+                          but the plain static divider that used to sit
+                          below the strip is replaced by a custom
+                          track+thumb indicator underneath — see
+                          monthStripScrollThumb below — so there's still a
+                          visible, animated signal of scroll position/how
+                          much more content there is. */}
+                      <div
+                        ref={monthStripRef}
+                        onScroll={updateMonthStripScrollThumb}
+                        className="w-full flex gap-2 overflow-x-auto no-scrollbar pb-2 -mx-1 px-1"
+                      >
                         {(calendarMonthsOverviewLoading && calendarMonthsOverview.length === 0
                           ? Array.from({ length: 6 })
                           : calendarMonthsOverview
@@ -4314,6 +4423,19 @@ export default function Webapp() {
                         })}
                       </div>
 
+                      {/* Animated scroll-position "underline" standing in
+                          for the strip's old static border-b divider —
+                          thumb width/position are recomputed on every
+                          scroll event (see updateMonthStripScrollThumb),
+                          and the transition classes animate it smoothly
+                          rather than snapping. */}
+                      <div className="relative w-full h-[3px] rounded-full bg-[var(--border)]/50 mb-4 overflow-hidden">
+                        <div
+                          className="absolute inset-y-0 rounded-full bg-[var(--accent)] transition-[left,width] duration-150 ease-out"
+                          style={{ width: `${monthStripScrollThumb.widthPct}%`, left: `${monthStripScrollThumb.leftPct}%` }}
+                        />
+                      </div>
+
                       {/* Weekdays Headers */}
                       <div className="grid grid-cols-7 text-center text-[10px] font-bold text-[var(--text-secondary)] mb-4 gap-y-1 uppercase tracking-widest w-full font-serif">
                         <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
@@ -4333,7 +4455,12 @@ export default function Webapp() {
                           const isSelected = selectedCalendarDate === dateStr;
                           const isToday = dateStr === todayCalendarDateStr;
                           const dayOrders = calendarOrdersByDate[dateStr] ?? [];
-                          const visibleOrders = dayOrders.slice(0, 2);
+                          // Only the first order's name is shown directly on the
+                          // cell now (cake category dropped entirely) — full
+                          // details for every order on the date are one tap away
+                          // in the drill-down list below, so the cell itself only
+                          // needs to signal "something's here" and how much.
+                          const visibleOrders = dayOrders.slice(0, 1);
                           const overflowCount = dayOrders.length - visibleOrders.length;
 
                           return (
@@ -4368,7 +4495,6 @@ export default function Webapp() {
                                   title={`${o.customerName || 'Walk-in customer'} — ${o.cakeCategory}`}
                                 >
                                   <div className="text-[8px] font-bold truncate">{o.customerName || 'Walk-in'}</div>
-                                  <div className="text-[7px] font-medium opacity-80 truncate">{o.cakeCategory}</div>
                                 </div>
                               ))}
                               {overflowCount > 0 && (
@@ -5089,14 +5215,30 @@ export default function Webapp() {
                       )}
                     </div>
 
-                    {/* Recent purchases log (Right Column) — real GET /api/investments */}
+                    {/* Recent purchases log (Right Column) — real GET
+                        /api/investments, capped to the 5 most recent (see
+                        RECENT_INVESTMENTS_LIMIT) like a bank statement's
+                        account summary. "View All" drills into the
+                        separately-paginated expense-history sheet rather
+                        than paginating in place here. */}
                     <div className="lg:col-span-2 flex flex-col gap-3.5">
-                      <h3 className="font-serif text-lg font-bold">Recent Purchases</h3>
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-serif text-lg font-bold">Recent Purchases</h3>
+                        {!!investmentsPagination && investmentsPagination.totalItems > RECENT_INVESTMENTS_LIMIT && (
+                          <button
+                            type="button"
+                            onClick={openExpenseHistory}
+                            className="text-xs font-bold text-[var(--accent)] hover:underline cursor-pointer flex items-center gap-0.5"
+                          >
+                            View All <ChevronRight size={14} />
+                          </button>
+                        )}
+                      </div>
 
                       {investmentsError && (
                         <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
                           <span className="flex items-center gap-2"><AlertCircle size={14} /> {investmentsError}</span>
-                          <button onClick={() => setInvestmentsPage((p) => p)} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                          <button onClick={fetchInvestments} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
                         </div>
                       )}
 
@@ -5156,27 +5298,6 @@ export default function Webapp() {
                           ))}
                       </div>
 
-                      {investmentsPagination && investmentsPagination.totalPages > 1 && (
-                        <div className="flex items-center justify-between mt-2">
-                          <button
-                            disabled={!investmentsPagination.hasPrevious}
-                            onClick={() => setInvestmentsPage((p) => Math.max(1, p - 1))}
-                            className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                          >
-                            Previous
-                          </button>
-                          <span className="text-xs text-[var(--text-secondary)]">
-                            Page {investmentsPagination.page} of {investmentsPagination.totalPages}
-                          </span>
-                          <button
-                            disabled={!investmentsPagination.hasNext}
-                            onClick={() => setInvestmentsPage((p) => p + 1)}
-                            className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                          >
-                            Next
-                          </button>
-                        </div>
-                      )}
                     </div>
 
                   </div>
@@ -8406,6 +8527,107 @@ export default function Webapp() {
                                 ))}
                             </div>
                           </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* SHEET: EXPENSE HISTORY — full, independently-paginated
+                        expense ledger, opened via "View All" on the
+                        Expenses tab's Recent Purchases (which itself only
+                        ever shows the 5 most recent, bank-statement-style).
+                        Reuses the exact same entry-card markup/behavior
+                        (receipt lightbox, delete) as Recent Purchases,
+                        just reading from historyList/historyPagination
+                        instead. */}
+                    {activeSheet === 'expense-history' && (
+                      <div className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                          <button type="button" onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">Expense History</h3>
+                          <span className="w-8" />
+                        </div>
+
+                        <div className="flex-1 flex flex-col gap-4 overflow-y-auto">
+                          {historyError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
+                              <span className="flex items-center gap-2"><AlertCircle size={14} /> {historyError}</span>
+                              <button onClick={fetchExpenseHistory} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                            </div>
+                          )}
+
+                          {historyLoading &&
+                            [0, 1, 2, 3].map((i) => (
+                              <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
+                            ))}
+
+                          {!historyLoading && !historyError && historyList.length === 0 && (
+                            <p className="text-xs text-[var(--text-secondary)] text-center py-8">No expenses logged yet.</p>
+                          )}
+
+                          {!historyLoading &&
+                            historyList.map((entry) => (
+                              <div
+                                key={entry.id}
+                                onClick={entry.receiptPhotoUrl ? () => setReceiptLightboxUrl(entry.receiptPhotoUrl) : undefined}
+                                className={`bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center ${entry.receiptPhotoUrl ? 'cursor-pointer' : ''}`}
+                              >
+                                <div>
+                                  <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{entry.purchaseDate}</span>
+                                  <h4 className="font-bold text-sm text-[var(--text-primary)] mt-1">{entry.materialName}</h4>
+                                  <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{entry.quantity} {entry.unit} × ₹{entry.pricePerUnit}</p>
+                                  <div className="flex items-center gap-1.5 mt-2">
+                                    <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full uppercase tracking-wide">
+                                      {entry.category}
+                                    </span>
+                                    {entry.receiptPhotoUrl && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setReceiptLightboxUrl(entry.receiptPhotoUrl); }}
+                                        className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-50 dark:bg-[#1A0C06] text-orange-600 border border-orange-100 cursor-pointer"
+                                        aria-label="View receipt photo"
+                                      >
+                                        <Receipt size={11} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteInvestment(entry); }}
+                                    disabled={investmentDeletingId === entry.id}
+                                    className="p-1.5 text-[var(--text-secondary)] hover:text-red-600 disabled:opacity-40 rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                    aria-label="Delete expense"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+
+                        {historyPagination && historyPagination.totalPages > 1 && (
+                          <div className="flex items-center justify-between mt-4 pt-4 border-t border-[var(--border)]">
+                            <button
+                              disabled={!historyPagination.hasPrevious}
+                              onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+                              className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              Previous
+                            </button>
+                            <span className="text-xs text-[var(--text-secondary)]">
+                              Page {historyPagination.page} of {historyPagination.totalPages}
+                            </span>
+                            <button
+                              disabled={!historyPagination.hasNext}
+                              onClick={() => setHistoryPage((p) => p + 1)}
+                              className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              Next
+                            </button>
+                          </div>
                         )}
                       </div>
                     )}
