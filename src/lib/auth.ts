@@ -12,7 +12,7 @@
  * receives those cookies across the frontend/backend origin difference.
  */
 
-import { api } from './api';
+import { api, ApiError } from './api';
 
 // `??` (not `||`) — see the matching comment in lib/api.ts: an
 // intentionally-empty string (same-origin relative requests, used by the
@@ -99,22 +99,51 @@ export async function verifyEmailOtp(email: string, otp: string): Promise<Verify
   }
 }
 
+// 'authenticated' — the backend confirmed the session; go to the dashboard.
+// 'unauthenticated' — the backend affirmatively said no (a real 401 after
+//   the api client's own refresh attempt already failed); this is a
+//   genuine logged-out state, so the login screen is correct.
+// 'unreachable' — we never got a real answer (timeout, network failure, a
+//   cold-starting backend). This must NOT be treated the same as
+//   'unauthenticated': doing that is what bounced users with perfectly
+//   valid sessions to the login screen whenever the backend was slow.
+export type SessionCheckResult = 'authenticated' | 'unauthenticated' | 'unreachable';
+
+// One short backoff retry before giving up and asking the caller to show a
+// "reconnecting" state — long enough to ride out ordinary jitter, short
+// enough not to add much to an already-slow cold start.
+const SESSION_CHECK_RETRY_DELAY_MS = 4000;
+
+async function checkSessionOnce(): Promise<SessionCheckResult> {
+  try {
+    await api.get('/api/baker/profile');
+    return 'authenticated';
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      return 'unauthenticated';
+    }
+    return 'unreachable';
+  }
+}
+
 /**
  * Checks whether a valid session cookie already exists, by calling an
  * endpoint that requires authentication. Used on app load to decide
- * whether to show the login screen or go straight to the dashboard —
- * the httpOnly cookie can't be read from JS, so this is the only way
- * to know. Goes through the shared `api` client so an access token that
- * expired but still has a live 7-day refresh token gets silently
+ * whether to show the login screen, the dashboard, or a "reconnecting"
+ * state — the httpOnly cookie can't be read from JS, so this is the only
+ * way to know. Goes through the shared `api` client so an access token
+ * that expired but still has a live 7-day refresh token gets silently
  * refreshed here too, rather than bouncing to login unnecessarily.
+ *
+ * Retries once on 'unreachable' before giving up — deliberately not more
+ * than once, and never silently forever: the caller is expected to show a
+ * retry affordance rather than loop.
  */
-export async function checkSession(): Promise<boolean> {
-  try {
-    await api.get('/api/baker/profile');
-    return true;
-  } catch {
-    return false;
-  }
+export async function checkSession(): Promise<SessionCheckResult> {
+  const first = await checkSessionOnce();
+  if (first !== 'unreachable') return first;
+  await new Promise((resolve) => setTimeout(resolve, SESSION_CHECK_RETRY_DELAY_MS));
+  return checkSessionOnce();
 }
 
 /**
