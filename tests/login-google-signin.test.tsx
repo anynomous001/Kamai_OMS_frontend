@@ -35,7 +35,7 @@ vi.mock('next/script', () => ({
 }));
 
 vi.mock('@/lib/auth', () => ({
-  checkSession: vi.fn().mockResolvedValue(false),
+  checkSession: vi.fn().mockResolvedValue('unauthenticated'),
   sendEmailOtp: vi.fn(),
   verifyEmailOtp: vi.fn(),
   logout: vi.fn(),

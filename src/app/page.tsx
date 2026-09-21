@@ -584,7 +584,7 @@ function OrderCard({
 export default function Webapp() {
   // --- BASE APP STATE ---
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
-  const [step, setStep] = useState<'login' | 'otp' | 'dashboard'>('login');
+  const [step, setStep] = useState<'login' | 'otp' | 'dashboard' | 'reconnecting'>('login');
   const [isCheckingSession, setIsCheckingSession] = useState(true);
 
   // Real dashboard data (GET /api/dashboard/summary)
@@ -1902,16 +1902,35 @@ export default function Webapp() {
   // it's still valid rather than defaulting to the login screen every time.
   useEffect(() => {
     let cancelled = false;
-    checkSession().then((isAuthenticated) => {
+    checkSession().then((result) => {
       if (cancelled) return;
-      if (isAuthenticated) {
+      if (result === 'authenticated') {
         setStep('dashboard');
+      } else if (result === 'unreachable') {
+        // Never got a real answer (timeout/cold backend) — the session may
+        // still be perfectly valid, so don't default to the login screen.
+        setStep('reconnecting');
       }
       setIsCheckingSession(false);
     });
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Manual retry from the "reconnecting" screen — deliberately not an
+  // automatic/silent loop (checkSession() already retries once internally).
+  const handleRetrySessionCheck = useCallback(() => {
+    setIsCheckingSession(true);
+    checkSession().then((result) => {
+      if (result === 'authenticated') {
+        setStep('dashboard');
+      } else if (result === 'unauthenticated') {
+        setStep('login');
+      }
+      // 'unreachable' again: stay on 'reconnecting' and let the user retry.
+      setIsCheckingSession(false);
+    });
   }, []);
 
   // Fetch real dashboard summary once authenticated
@@ -3357,6 +3376,28 @@ export default function Webapp() {
             {isCheckingSession && (
               <div className="flex-1 flex items-center justify-center">
                 <div className="w-8 h-8 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
+              </div>
+            )}
+
+            {/* SESSION CHECK COULDN'T REACH THE SERVER (timeout / cold backend) —
+                the session may still be perfectly valid, so this is a distinct
+                state from a real logged-out login screen, with a manual retry
+                rather than a silent loop. */}
+            {!isCheckingSession && step === 'reconnecting' && (
+              <div className="flex-1 flex flex-col items-center justify-center px-6 text-center gap-4">
+                <div className="w-10 h-10 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
+                <p className="text-[14.5px] font-medium text-[var(--text-primary)]">
+                  Having trouble reaching Kamai&apos;s servers.
+                </p>
+                <p className="text-[13px] text-[var(--text-secondary)] max-w-xs">
+                  Your session may still be valid — this looks like a slow connection, not a logout.
+                </p>
+                <button
+                  onClick={handleRetrySessionCheck}
+                  className="mt-2 px-6 py-3 rounded-2xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-bold text-sm cursor-pointer active:scale-[0.99] transition-all"
+                >
+                  Retry
+                </button>
               </div>
             )}
 
