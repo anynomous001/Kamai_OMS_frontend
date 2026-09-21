@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import Script from 'next/script';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Home as HomeIcon, ClipboardList, Users, Calendar as CalendarIcon,
@@ -12,7 +13,7 @@ import {
   UtensilsCrossed, Trash2, Pencil, ArrowUp, ArrowDown, Link2, Copy,
   Share2, Download, Store, Truck, Clock,
   ArrowUpDown, ShoppingCart, Minus, MapPin, RotateCcw,
-  IndianRupee, PiggyBank
+  IndianRupee, PiggyBank, Camera, Receipt
 } from 'lucide-react';
 import { sendEmailOtp, verifyEmailOtp, checkSession, logout as logoutRequest } from '@/lib/auth';
 import { api } from '@/lib/api';
@@ -32,6 +33,28 @@ import type {
   Wholesaler, WholesaleProduct, WholesalerPolicies, WholesaleCart,
   PlaceOrderResponse, OrderStatusResponse, BakerOrderListItem, FulfilmentMode, OrderItem,
 } from '@/lib/marketplace/types';
+
+// Google Identity Services — loaded via the <Script> tag below, not an
+// npm package, so its shape isn't otherwise known to TypeScript. Typed
+// narrowly to just what this file actually calls.
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: {
+            client_id: string;
+            callback: (response: { credential: string }) => void;
+          }) => void;
+          renderButton: (
+            parent: HTMLElement,
+            options: { type: string; theme: string; size: string; shape: string; width?: string },
+          ) => void;
+        };
+      };
+    };
+  }
+}
 
 // --- REAL API RESPONSE SHAPES (per verified backend contract) ---
 interface DashboardTodayOrder {
@@ -87,11 +110,15 @@ interface DashboardSummary {
   };
 }
 
-// Real order-list status vocabulary (Pending/Confirmed/In Progress/Ready/
-// Delivered/Cancelled) — distinct from the mock Order['status'] type still
-// used elsewhere until those screens are wired.
-type RealOrderStatus = 'Pending' | 'Confirmed' | 'In Progress' | 'Ready' | 'Delivered' | 'Cancelled';
-const ALL_ORDER_STATUSES: RealOrderStatus[] = ['Pending', 'Confirmed', 'In Progress', 'Ready', 'Delivered', 'Cancelled'];
+// Real order-list status vocabulary — simplified lifecycle (2026-08):
+// Pending -> Confirmed -> Delivered, with Cancelled reachable as an
+// exception from either Pending or Confirmed. The old 6-state pipeline
+// (In Progress/Ready as intermediate production stages) was collapsed to
+// this on the backend (status-validation.service.ts) — kept in sync here.
+// Distinct from the mock Order['status'] type still used elsewhere until
+// those screens are wired.
+type RealOrderStatus = 'Pending' | 'Confirmed' | 'Delivered' | 'Cancelled';
+const ALL_ORDER_STATUSES: RealOrderStatus[] = ['Pending', 'Confirmed', 'Delivered', 'Cancelled'];
 
 // Orders-list quick-filter chips — distinct from RealOrderStatus because two
 // of these ('DeliveredThisMonth', 'Recent') aren't a single status value,
@@ -138,14 +165,10 @@ function derivePaymentStatus(totalPrice: number, balanceDue: number): PaymentSta
 
 // orderStatus color palette — shared by day-cell order chips, order-card
 // status pills, the orders-list badge, and the interactive status selector
-// on Order Detail, so all four stay visually consistent. Updated for the
-// Aug 2026 status-editing spec (Confirmed=blue, In Progress=brand orange
-// #EA580C, Ready=purple, Delivered=green); Pending/Cancelled unchanged.
+// on Order Detail, so all four stay visually consistent.
 const ORDER_STATUS_COLORS: Record<RealOrderStatus, string> = {
   Pending: '#FFC107',
   Confirmed: '#2196F3',
-  'In Progress': '#EA580C',
-  Ready: '#8B5CF6',
   Delivered: '#4CAF50',
   Cancelled: '#9E9E9E',
 };
@@ -309,6 +332,7 @@ interface RealInvestmentEntry {
   totalCost: number;
   supplierName: string | null;
   purchaseDate: string;
+  receiptPhotoUrl: string | null;
 }
 
 // Real menu-item unit vocab (per confirmed backend contract, Action 26).
@@ -382,8 +406,6 @@ interface RealCalendarDay {
   totalOrders: number;
   pending: number;
   confirmed: number;
-  inProgress: number;
-  ready: number;
   delivered: number;
   outstandingBalance: number;
 }
@@ -562,7 +584,7 @@ function OrderCard({
 export default function Webapp() {
   // --- BASE APP STATE ---
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
-  const [step, setStep] = useState<'login' | 'otp' | 'dashboard'>('login');
+  const [step, setStep] = useState<'login' | 'otp' | 'dashboard' | 'reconnecting'>('login');
   const [isCheckingSession, setIsCheckingSession] = useState(true);
 
   // Real dashboard data (GET /api/dashboard/summary)
@@ -586,6 +608,18 @@ export default function Webapp() {
   const [otpTimer, setOtpTimer] = useState(29);
   const [isVerifying, setIsVerifying] = useState(false);
 
+  // Google Sign-In — additive second login method, Baker side only. Email
+  // OTP above is completely unchanged; this is a fully independent entry
+  // point that happens to land on the same setStep('dashboard') on
+  // success. Only rendered when NEXT_PUBLIC_GOOGLE_CLIENT_ID is set
+  // (mirrors NEXT_PUBLIC_FEATURE_MARKETPLACE's pattern elsewhere in this
+  // file) — the credentials don't exist in every environment yet, and an
+  // unconfigured deployment must silently fall back to email-only rather
+  // than show a broken button.
+  const [googleSignInLoading, setGoogleSignInLoading] = useState(false);
+  const [googleSignInError, setGoogleSignInError] = useState('');
+  const googleButtonRef = useRef<HTMLDivElement | null>(null);
+
   // Navigation tabs
   // Home, Orders, Customers, Calendar, Supply, Settings, Expenses
   const [activeTab, setActiveTab] = useState<'home' | 'orders' | 'customers' | 'calendar' | 'supply' | 'settings' | 'expenses'>('home');
@@ -595,7 +629,8 @@ export default function Webapp() {
     'none' | 'new-order' | 'edit-order' | 'customer-profile' | 'edit-profile' |
     'manage-upi' | 'subscription-autopay' | 'choose-plan' |
     'subscription-status' | 'help-support' |
-    'my-menu' | 'add-edit-menu-item' | 'share-menu' | 'supply-catalogue' | 'supply-cart' | 'supply-orders'
+    'my-menu' | 'add-edit-menu-item' | 'share-menu' | 'supply-catalogue' | 'supply-cart' | 'supply-orders' |
+    'expense-history'
   >('none');
 
   // Business state — bakeryName/ownerName/phoneNumber/upiId/fssaiLicense/
@@ -626,22 +661,33 @@ export default function Webapp() {
   // backend calls (caption text via the existing /notifications/whatsapp
   // endpoint keyed by the order's UUID `id`, then the branded PNG via the
   // new /receipt-image endpoint keyed by the display `orderId`) followed
-  // by a fetch of the resulting signed image URL. Deliberately skips the
-  // OS share sheet (navigator.share) and jumps straight to wa.me with the
-  // customer's own number (whatsappUrl is keyed off order.customer.phone
-  // server-side, see notifications.service.ts) — WhatsApp's deep-link API
-  // only supports prefilled text, not an attached file, so the receipt
-  // image still has to be downloaded and manually attached once the chat
-  // opens; this only removes the app-picker/contact-picker hunting.
+  // by a fetch of the resulting signed image URL. confirmReceiptShare
+  // below prefers the OS share sheet (navigator.share with the file
+  // attached) wherever the device/browser actually supports sharing files
+  // — the baker picks WhatsApp (or anything else) straight from there,
+  // image already attached, no manual step. That's most mobile browsers
+  // today; Web Share API's file support was still shaky when this was
+  // first built, which is why the original version skipped straight to
+  // wa.me. Desktop browsers mostly still can't share files this way, so
+  // they keep the old fallback: download the image and open wa.me with
+  // the customer's own number prefilled (whatsappUrl is keyed off
+  // order.customer.phone server-side, see notifications.service.ts) —
+  // WhatsApp Web's deep link only supports prefilled text, not an
+  // attached file, so the baker manually attaches the already-downloaded
+  // image once the chat opens.
   //
   // window.open() must run synchronously inside a live user-gesture —
-  // same constraint navigator.share() had — so this is a two-tap flow:
+  // same constraint navigator.share() has — so this is a two-tap flow:
   // the first tap fetches everything and stores it in receiptSharePayload;
   // a second, fresh tap triggers the download and window.open() with no
   // awaits before them.
   const [receiptSharing, setReceiptSharing] = useState(false);
   const [receiptShareError, setReceiptShareError] = useState<string | null>(null);
   const [receiptShareSent, setReceiptShareSent] = useState(false);
+  // Which path confirmReceiptShare actually took, so the post-share banner
+  // wording matches what happened — only meaningful once receiptShareSent
+  // is true (see confirmReceiptShare below).
+  const [receiptShareUsedFallback, setReceiptShareUsedFallback] = useState(false);
   const [receiptSharePayload, setReceiptSharePayload] = useState<{ file: File; whatsappUrl: string } | null>(null);
   // A fast double-tap on either button fires two click events before React
   // re-renders to disable/hide it — state alone doesn't close that window
@@ -684,6 +730,7 @@ export default function Webapp() {
     setOrderDetailError(null);
     setReceiptShareError(null);
     setReceiptShareSent(false);
+    setReceiptShareUsedFallback(false);
     setReceiptSharePayload(null);
     setActiveSheet('customer-profile');
     setOrderDetailLoading(true);
@@ -815,6 +862,30 @@ export default function Webapp() {
     if (!receiptSharePayload || receiptShareConfirmedRef.current) return;
     receiptShareConfirmedRef.current = true;
     const { file, whatsappUrl } = receiptSharePayload;
+
+    // navigator.canShare({ files }) is the real capability check — canShare
+    // existing doesn't guarantee file support, and some browsers implement
+    // share() for text/url but throw on files. Only take this path when
+    // both exist and canShare confirms this exact file is shareable.
+    if (
+      typeof navigator.share === 'function' &&
+      typeof navigator.canShare === 'function' &&
+      navigator.canShare({ files: [file] })
+    ) {
+      setReceiptShareUsedFallback(false);
+      // Fire-and-forget: a user backing out of the share sheet rejects
+      // this promise too, which isn't an error worth surfacing.
+      navigator.share({ files: [file], title: file.name }).catch(() => {});
+      setReceiptShareSent(true);
+      setReceiptSharePayload(null);
+      return;
+    }
+
+    // Fallback for browsers that can't share files (most desktop
+    // browsers): download the image and open WhatsApp with prefilled
+    // text; the baker manually attaches the already-downloaded image once
+    // the chat opens.
+    setReceiptShareUsedFallback(true);
     const downloadUrl = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = downloadUrl;
@@ -1096,7 +1167,7 @@ export default function Webapp() {
   const confirmPendingStatusChange = () => {
     if (!pendingStatusConfirm) return;
     const { orderNumber, newStatus } = pendingStatusConfirm;
-    const previousStatus = selectedOrderDetail?.orderId === orderNumber ? (selectedOrderDetail.status as RealOrderStatus) : 'Ready';
+    const previousStatus = selectedOrderDetail?.orderId === orderNumber ? (selectedOrderDetail.status as RealOrderStatus) : 'Confirmed';
     setPendingStatusConfirm(null);
     applyOrderStatusChange(orderNumber, newStatus, previousStatus);
   };
@@ -1250,14 +1321,51 @@ export default function Webapp() {
     purchaseDate: new Date().toISOString().slice(0, 10),
     supplierName: '',
   });
+  // "Recent Purchases" on the Expenses tab itself is intentionally capped
+  // at the 5 most recent entries (RECENT_INVESTMENTS_LIMIT below) — like a
+  // bank statement's account summary, not the full transaction history.
+  // "View All" opens the expense-history sheet below, which has its own
+  // independent, fully paginated list/state (historyList etc.).
   const [investmentsList, setInvestmentsList] = useState<RealInvestmentEntry[]>([]);
   const [investmentsPagination, setInvestmentsPagination] = useState<OrdersPagination | null>(null);
-  const [investmentsPage, setInvestmentsPage] = useState(1);
   const [investmentsLoading, setInvestmentsLoading] = useState(false);
   const [investmentsError, setInvestmentsError] = useState<string | null>(null);
+  const [investmentDeletingId, setInvestmentDeletingId] = useState<string | null>(null);
   const [monthlySpend, setMonthlySpend] = useState<number | null>(null);
+
+  // Full expense history sheet — opened via "View All" on Recent
+  // Purchases. Separate list/pagination state from the recent-5 list
+  // above so browsing/paginating history never disturbs what's shown on
+  // the main Expenses tab.
+  const [historyList, setHistoryList] = useState<RealInvestmentEntry[]>([]);
+  const [historyPagination, setHistoryPagination] = useState<OrdersPagination | null>(null);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [logExpenseSubmitting, setLogExpenseSubmitting] = useState(false);
   const [logExpenseError, setLogExpenseError] = useState<string | null>(null);
+
+  // Quick Total mode — a stripped-down alternative to the Detailed form
+  // above (category + amount + optional note/receipt photo), posting to
+  // the same POST /api/investments as Detailed. Detailed's own state/
+  // handler above is untouched; Quick Total gets its own form state but
+  // shares logExpenseSubmitting/logExpenseError since only one form is
+  // ever visible at a time.
+  const [expenseLogMode, setExpenseLogMode] = useState<'detailed' | 'quick'>('detailed');
+  const [quickExpenseForm, setQuickExpenseForm] = useState({
+    category: 'ingredients' as RealInvestmentCategory,
+    amount: '',
+    note: '',
+    receiptPhotoPath: '',
+    receiptPhotoPreviewUrl: '',
+  });
+  const [quickExpensePhotoUploading, setQuickExpensePhotoUploading] = useState(false);
+  const [quickExpensePhotoUploadError, setQuickExpensePhotoUploadError] = useState<string | null>(null);
+
+  // Full-screen receipt photo viewer — independent overlay state (not an
+  // activeSheet value) so it can open from the Expenses tab's Recent
+  // Purchases list without navigating away from it.
+  const [receiptLightboxUrl, setReceiptLightboxUrl] = useState<string | null>(null);
 
   // Finance Analytics (below the Expense Ledger) — real GET
   // /api/analytics/summary. Trend (charts 1 & 3) is always the trailing
@@ -1755,21 +1863,74 @@ export default function Webapp() {
   const [calendarMonthsOverview, setCalendarMonthsOverview] = useState<RealCalendarMonthOverview[]>([]);
   const [calendarMonthsOverviewLoading, setCalendarMonthsOverviewLoading] = useState(false);
 
+  // Month-picker strip's own custom scrollbar — replaces the plain static
+  // divider that used to sit under it with a thin track+thumb indicator
+  // that actually reflects scroll position, since the native scrollbar is
+  // hidden (no-scrollbar) for the pill-strip look. thumbWidthPct is the
+  // viewport-to-content ratio (how much of the strip is visible at once);
+  // thumbLeftPct is the thumb's position within the track, both computed
+  // from the same scrollLeft/scrollWidth/clientWidth math a native
+  // scrollbar uses internally.
+  const monthStripRef = useRef<HTMLDivElement | null>(null);
+  const [monthStripScrollThumb, setMonthStripScrollThumb] = useState({ widthPct: 100, leftPct: 0 });
+
+  const updateMonthStripScrollThumb = useCallback(() => {
+    const el = monthStripRef.current;
+    if (!el) return;
+    const { scrollLeft, scrollWidth, clientWidth } = el;
+    if (scrollWidth <= clientWidth) {
+      setMonthStripScrollThumb({ widthPct: 100, leftPct: 0 });
+      return;
+    }
+    // Floored at 15% so the thumb never shrinks to an unnoticeable sliver
+    // on a strip with many months — matches how most custom scrollbar
+    // implementations keep a minimum-tappable/visible thumb size.
+    const widthPct = Math.max((clientWidth / scrollWidth) * 100, 15);
+    const scrollableDistance = scrollWidth - clientWidth;
+    const leftPct = scrollableDistance > 0 ? (scrollLeft / scrollableDistance) * (100 - widthPct) : 0;
+    setMonthStripScrollThumb({ widthPct, leftPct });
+  }, []);
+
+  // Recompute whenever the strip's content changes (new months loaded) —
+  // scrollWidth isn't known until the pills actually render.
+  useEffect(() => {
+    updateMonthStripScrollThumb();
+  }, [calendarMonthsOverview, updateMonthStripScrollThumb]);
+
   // Bootstrap: the session lives in an httpOnly cookie the browser already
   // holds after a successful login, so on load we ask the backend whether
   // it's still valid rather than defaulting to the login screen every time.
   useEffect(() => {
     let cancelled = false;
-    checkSession().then((isAuthenticated) => {
+    checkSession().then((result) => {
       if (cancelled) return;
-      if (isAuthenticated) {
+      if (result === 'authenticated') {
         setStep('dashboard');
+      } else if (result === 'unreachable') {
+        // Never got a real answer (timeout/cold backend) — the session may
+        // still be perfectly valid, so don't default to the login screen.
+        setStep('reconnecting');
       }
       setIsCheckingSession(false);
     });
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Manual retry from the "reconnecting" screen — deliberately not an
+  // automatic/silent loop (checkSession() already retries once internally).
+  const handleRetrySessionCheck = useCallback(() => {
+    setIsCheckingSession(true);
+    checkSession().then((result) => {
+      if (result === 'authenticated') {
+        setStep('dashboard');
+      } else if (result === 'unauthenticated') {
+        setStep('login');
+      }
+      // 'unreachable' again: stay on 'reconnecting' and let the user retry.
+      setIsCheckingSession(false);
+    });
   }, []);
 
   // Fetch real dashboard summary once authenticated
@@ -2049,13 +2210,16 @@ export default function Webapp() {
     setCustomersPage(1);
   }, [customerSearch]);
 
-  // Real investments/expense ledger (GET /api/investments)
+  // Real investments/expense ledger (GET /api/investments) — Recent
+  // Purchases always shows just the 5 most recent (page 1, limit 5); the
+  // full history lives in its own sheet/fetch below.
+  const RECENT_INVESTMENTS_LIMIT = 5;
   const fetchInvestments = useCallback(() => {
     setInvestmentsLoading(true);
     setInvestmentsError(null);
     const params = new URLSearchParams();
-    params.set('page', String(investmentsPage));
-    params.set('limit', '10');
+    params.set('page', '1');
+    params.set('limit', String(RECENT_INVESTMENTS_LIMIT));
     api
       .get<{ success: boolean; data: { entries: RealInvestmentEntry[]; pagination: OrdersPagination } }>(
         `/api/investments?${params.toString()}`,
@@ -2066,8 +2230,41 @@ export default function Webapp() {
       })
       .catch((err: any) => setInvestmentsError(err.message || 'Failed to load expenses.'))
       .finally(() => setInvestmentsLoading(false));
+  }, []);
+
+  // Full expense history (GET /api/investments), paginated independently
+  // of the recent-5 list — backs the "expense-history" sheet opened via
+  // Recent Purchases' "View All".
+  const fetchExpenseHistory = useCallback(() => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    const params = new URLSearchParams();
+    params.set('page', String(historyPage));
+    params.set('limit', '20');
+    api
+      .get<{ success: boolean; data: { entries: RealInvestmentEntry[]; pagination: OrdersPagination } }>(
+        `/api/investments?${params.toString()}`,
+      )
+      .then((res) => {
+        setHistoryList(res.data.entries);
+        setHistoryPagination(res.data.pagination);
+      })
+      .catch((err: any) => setHistoryError(err.message || 'Failed to load expense history.'))
+      .finally(() => setHistoryLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [investmentsPage]);
+  }, [historyPage]);
+
+  const openExpenseHistory = useCallback(() => {
+    setHistoryPage(1);
+    setActiveSheet('expense-history');
+  }, []);
+
+  useEffect(() => {
+    if (activeSheet === 'expense-history') {
+      fetchExpenseHistory();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSheet, historyPage]);
 
   // "Spent this Month" — a separate lightweight query scoped to the
   // current calendar month (from/to), since the main list above is
@@ -2090,7 +2287,7 @@ export default function Webapp() {
       fetchMonthlySpend();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, activeTab, investmentsPage]);
+  }, [step, activeTab]);
 
   // Finance Analytics — revenue/expenses/profit + order-count trend, always
   // the trailing 6 months (charts 1 & 3 share this one fetch/window).
@@ -2668,6 +2865,78 @@ export default function Webapp() {
     }
   };
 
+  // Google Sign-In — receives the ID token from Google's own rendered
+  // button (never anything the client itself asserts about identity) and
+  // hands it to the new backend endpoint for real server-side
+  // verification. Response shape matches verify-email-otp's exactly
+  // (bakerId/isNew/message), so this reuses the identical post-login
+  // routing: just setStep('dashboard'). isNew isn't currently branched on
+  // by the OTP flow either (see handleVerifyOtp above) — no new routing
+  // logic is introduced here beyond what already exists.
+  const handleGoogleCredentialResponse = useCallback(async (response: { credential: string }) => {
+    setGoogleSignInLoading(true);
+    setGoogleSignInError('');
+    try {
+      await api.post('/api/auth/google', { idToken: response.credential });
+      setStep('dashboard');
+    } catch (err: any) {
+      setGoogleSignInError(err.message || 'Google sign-in failed. Please try again.');
+    } finally {
+      setGoogleSignInLoading(false);
+    }
+  }, []);
+
+  // Initializes Google Identity Services and renders its own button into
+  // googleButtonRef once the login screen is actually showing. Google's
+  // own button (not a custom one) is required for its client-side flow to
+  // work reliably — a custom "Continue with Google" button calling
+  // `prompt()` directly is subject to Google's own One Tap suppression
+  // heuristics and is far less reliable than letting Google render and
+  // own its button.
+  //
+  // Deliberately polls for window.google.accounts.id instead of trusting
+  // next/script's onLoad callback — in
+  // production, onLoad firing turned out not to be reliable enough on its
+  // own (observed: the GSI script demonstrably loads — network 200,
+  // window.google populated within a couple seconds — yet onLoad's
+  // resulting effect run never fired, leaving the button container
+  // permanently empty on an otherwise-working page/origin; manually
+  // calling initialize/renderButton from the console worked immediately).
+  // Polling on the actual condition that matters (is the API object
+  // there yet) sidesteps whatever specific onLoad-timing quirk that is.
+  useEffect(() => {
+    if (step !== 'login') return;
+    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+    if (!clientId) return;
+
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 50; // ~5s at 100ms — generous for a script that's usually ready in well under 1s
+
+    const tryRender = () => {
+      if (cancelled) return;
+      if (googleButtonRef.current && window.google?.accounts?.id) {
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          callback: (response) => { void handleGoogleCredentialResponse(response); },
+        });
+        window.google.accounts.id.renderButton(googleButtonRef.current, {
+          type: 'standard',
+          theme: 'outline',
+          size: 'large',
+          shape: 'pill',
+          width: '352',
+        });
+        return;
+      }
+      attempts += 1;
+      if (attempts < MAX_ATTEMPTS) setTimeout(tryRender, 100);
+    };
+
+    tryRender();
+    return () => { cancelled = true; };
+  }, [step, handleGoogleCredentialResponse]);
+
   const handleLogExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
@@ -2700,6 +2969,101 @@ export default function Webapp() {
       setLogExpenseError(err.message || 'Failed to log expense.');
     } finally {
       setLogExpenseSubmitting(false);
+    }
+  };
+
+  // Receipt photo upload for Quick Total — mirrors handleMenuItemPhotoUpload's
+  // signed-upload + direct-PUT flow (category=INVESTMENT_RECEIPT), skipping
+  // /api/uploads/confirm the same way MENU_ITEM_PHOTO does: the backend
+  // verifies receiptPhotoPath actually exists in storage when the investment
+  // is created (see investments.service.ts), so confirming here would be
+  // redundant.
+  const handleQuickExpensePhotoUpload = async (file: File) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    setQuickExpensePhotoUploading(true);
+    setQuickExpensePhotoUploadError(null);
+    try {
+      const { data } = await api.post<{ success: boolean; data: { uploadUrl: string; filePath: string } }>(
+        '/api/uploads/signed-url',
+        { contentType: file.type, category: 'INVESTMENT_RECEIPT', originalFilename: file.name },
+      );
+
+      const uploadRes = await fetch(data.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!uploadRes.ok) {
+        throw new Error('Upload to storage failed. Please try again.');
+      }
+
+      setQuickExpenseForm((f) => ({ ...f, receiptPhotoPath: data.filePath, receiptPhotoPreviewUrl: URL.createObjectURL(file) }));
+    } catch (err: any) {
+      // Never blocks logging the expense — the baker can retry the photo
+      // or just submit without one; receiptPhotoPath simply stays unset.
+      setQuickExpensePhotoUploadError(err.message || 'Failed to upload photo.');
+    } finally {
+      setQuickExpensePhotoUploading(false);
+    }
+  };
+
+  const handleLogQuickExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    const amount = Number(quickExpenseForm.amount);
+    if (!amount || amount <= 0) return;
+
+    setLogExpenseSubmitting(true);
+    setLogExpenseError(null);
+    try {
+      // Quick Total entries are still plain investments rows, not a
+      // different data type — quantity/unit are fixed at 1/'expense' so
+      // pricePerUnit (== amount) is what the server computes totalCost
+      // from, and materialName (required by the API but not collected in
+      // this form) falls back to the category label.
+      await api.post('/api/investments', {
+        category: quickExpenseForm.category,
+        materialName: quickExpenseForm.category.charAt(0).toUpperCase() + quickExpenseForm.category.slice(1),
+        quantity: 1,
+        unit: 'expense',
+        pricePerUnit: amount,
+        purchaseDate: new Date().toISOString().slice(0, 10),
+        description: quickExpenseForm.note.trim() || undefined,
+        ...(quickExpenseForm.receiptPhotoPath ? { receiptPhotoPath: quickExpenseForm.receiptPhotoPath } : {}),
+      });
+      setQuickExpenseForm({ category: 'ingredients', amount: '', note: '', receiptPhotoPath: '', receiptPhotoPreviewUrl: '' });
+      setQuickExpensePhotoUploadError(null);
+      fetchInvestments();
+      fetchMonthlySpend();
+    } catch (err: any) {
+      setLogExpenseError(err.message || 'Failed to log expense.');
+    } finally {
+      setLogExpenseSubmitting(false);
+    }
+  };
+
+  // Mirrors handleDeleteMenuItem — soft delete via DELETE
+  // /api/investments/:entryId (already live on the backend), then refetch
+  // rather than splice the local list so "Spent this Month" and pagination
+  // totals stay correct.
+  const handleDeleteInvestment = async (entry: RealInvestmentEntry) => {
+    if (isPaywalled) { showReadOnlyBlockedMessage(); return; }
+    if (!window.confirm(`Delete "${entry.materialName}" (₹${entry.totalCost.toLocaleString('en-IN')})? This can't be undone.`)) return;
+
+    setInvestmentDeletingId(entry.id);
+    setInvestmentsError(null);
+    try {
+      await api.delete(`/api/investments/${entry.id}`);
+      fetchInvestments();
+      fetchMonthlySpend();
+      // The entry being deleted may be visible in the full-history sheet
+      // (opened separately from Recent Purchases) rather than the recent-5
+      // list — keep both in sync if history is currently open.
+      if (activeSheet === 'expense-history') fetchExpenseHistory();
+    } catch (err: any) {
+      setInvestmentsError(err.message || 'Failed to delete expense.');
+    } finally {
+      setInvestmentDeletingId(null);
     }
   };
 
@@ -2997,12 +3361,43 @@ export default function Webapp() {
 
   return (
     <div className="min-h-screen w-full flex justify-center bg-zinc-100 dark:bg-zinc-950 transition-colors duration-300">
+      {/* Google Identity Services — loaded unconditionally (not inside the
+          login-view conditional) so it's fetched once and stays available
+          across step changes, e.g. returning to the login screen after a
+          logout. No-op if NEXT_PUBLIC_GOOGLE_CLIENT_ID is unset — the
+          render effect above checks that before ever touching
+          window.google. No onLoad prop: the render effect polls for
+          window.google.accounts.id directly instead of trusting this
+          fires (see that effect's comment for why). */}
+      <Script src="https://accounts.google.com/gsi/client" strategy="afterInteractive" />
       <div className="noise-bg h-screen max-h-screen w-full max-w-[480px] flex flex-col bg-[var(--background)] shadow-2xl border-x border-[var(--border)] relative overflow-hidden">
 
             {/* SESSION BOOTSTRAP CHECK — avoids flashing the login screen while we ask the backend if the httpOnly cookie is still valid */}
             {isCheckingSession && (
               <div className="flex-1 flex items-center justify-center">
                 <div className="w-8 h-8 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
+              </div>
+            )}
+
+            {/* SESSION CHECK COULDN'T REACH THE SERVER (timeout / cold backend) —
+                the session may still be perfectly valid, so this is a distinct
+                state from a real logged-out login screen, with a manual retry
+                rather than a silent loop. */}
+            {!isCheckingSession && step === 'reconnecting' && (
+              <div className="flex-1 flex flex-col items-center justify-center px-6 text-center gap-4">
+                <div className="w-10 h-10 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
+                <p className="text-[14.5px] font-medium text-[var(--text-primary)]">
+                  Having trouble reaching Kamai&apos;s servers.
+                </p>
+                <p className="text-[13px] text-[var(--text-secondary)] max-w-xs">
+                  Your session may still be valid — this looks like a slow connection, not a logout.
+                </p>
+                <button
+                  onClick={handleRetrySessionCheck}
+                  className="mt-2 px-6 py-3 rounded-2xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-bold text-sm cursor-pointer active:scale-[0.99] transition-all"
+                >
+                  Retry
+                </button>
               </div>
             )}
 
@@ -3026,6 +3421,43 @@ export default function Webapp() {
                   <p className="text-center text-[14.5px] leading-relaxed text-[var(--text-secondary)] mb-10 max-w-xs">
                     Enter your email address to log in<br />or create your bakery&apos;s workspace.
                   </p>
+
+                  {/* Continue with Google — additive second login method,
+                      not a replacement. Only shown when configured; email
+                      OTP below works exactly as before either way. Uses
+                      Google's own rendered button (not a custom one) —
+                      see the render effect above for why. */}
+                  {process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID && (
+                    <div className="w-full mb-6 flex flex-col items-center">
+                      <div className="relative w-full flex justify-center">
+                        <div ref={googleButtonRef} className="w-full flex justify-center" />
+                        {/* Overlay directly on the button itself, not just a
+                            text line below it — Google's rendered button
+                            can't be restyled internally, so this is the
+                            actual click surface being covered/dimmed while
+                            the sign-in request is in flight, making it
+                            unambiguous the tap registered and something is
+                            happening, and blocking a second tap meanwhile. */}
+                        {googleSignInLoading && (
+                          <div className="absolute inset-0 flex items-center justify-center gap-2 rounded-full bg-[var(--surface)]/90 backdrop-blur-[1px] cursor-wait">
+                            <span className="w-4 h-4 border-2 border-[var(--text-secondary)]/30 border-t-[var(--text-secondary)] rounded-full animate-spin" />
+                            <span className="text-[12.5px] font-medium text-[var(--text-secondary)]">Signing you in…</span>
+                          </div>
+                        )}
+                      </div>
+                      {googleSignInError && (
+                        <div className="flex items-center gap-1.5 text-red-600 text-xs px-1 mt-2">
+                          <AlertCircle size={14} />
+                          <span>{googleSignInError}</span>
+                        </div>
+                      )}
+                      <div className="w-full flex items-center gap-3 mt-6">
+                        <div className="flex-1 h-px bg-[var(--border)]" />
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-secondary)]">or</span>
+                        <div className="flex-1 h-px bg-[var(--border)]" />
+                      </div>
+                    </div>
+                  )}
 
                   <div className="w-full mb-6">
                     <div className="flex border border-[var(--border)] rounded-2xl bg-[var(--surface)] overflow-hidden focus-within:border-[var(--accent)] transition-all h-[56px] items-center px-4 gap-3">
@@ -3345,58 +3777,74 @@ export default function Webapp() {
                         old 4 KPI cards + "This Month, In Detail" section. */}
                     <div className="grid grid-cols-2 gap-4">
 
-                      {/* Card 1: Total Orders This Month */}
+                      {/* Card 1: Total Orders This Month — blue (volume/informational,
+                          matches the Confirmed order-status blue elsewhere in the app).
+                          No background panel behind the icon — just the bare icon
+                          itself, enlarged and low-opacity, as a subtle corner
+                          watermark sitting behind the copy. */}
                       <div
                         onClick={() => setActiveTab('orders')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Total Orders This Month</span>
-                          <ClipboardList size={16} className="text-[var(--accent)]" />
-                        </div>
-                        <div className="mt-4">
+                        <ClipboardList size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-blue-500/20 dark:text-blue-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Total Orders This Month</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
-                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">{dashboardSummary?.metrics?.totalOrdersThisMonth ?? 0}</span>
+                            <>
+                              <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">{dashboardSummary?.metrics?.totalOrdersThisMonth ?? 0}</span>
+                              <div className="flex flex-wrap gap-1.5 mt-2">
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 border border-blue-100 dark:border-blue-900/40">
+                                  {dashboardSummary?.metrics?.confirmedOrdersCount ?? 0} Confirmed
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 border border-amber-100 dark:border-amber-900/40">
+                                  {dashboardSummary?.metrics?.pendingOrdersCount ?? 0} Pending
+                                </span>
+                              </div>
+                            </>
                           )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">
-                            {dashboardSummary?.metrics?.confirmedOrdersCount ?? 0} Confirmed · {dashboardSummary?.metrics?.pendingOrdersCount ?? 0} Pending
-                          </p>
                         </div>
                       </div>
 
-                      {/* Card 2: Expected This Month */}
+                      {/* Card 2: Expected This Month — emerald (revenue coming in) */}
                       <div
                         onClick={() => setActiveTab('orders')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Expected This Month</span>
-                          <IndianRupee size={16} className="text-[var(--accent)]" />
-                        </div>
-                        <div className="mt-4">
+                        <IndianRupee size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-emerald-500/20 dark:text-emerald-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Expected This Month</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
-                            <span className="text-3xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">₹{(dashboardSummary?.metrics?.expectedRevenueThisMonth ?? 0).toLocaleString('en-IN')}</span>
+                            <>
+                              <span className="text-2xl font-extrabold tracking-tight font-serif text-[var(--text-primary)]">₹{(dashboardSummary?.metrics?.expectedRevenueThisMonth ?? 0).toLocaleString('en-IN')}</span>
+                              <div className="flex flex-wrap gap-1.5 mt-2">
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 border border-blue-100 dark:border-blue-900/40">
+                                  ₹{(dashboardSummary?.metrics?.confirmedRevenue ?? 0).toLocaleString('en-IN')} Confirmed
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/40">
+                                  ₹{(dashboardSummary?.metrics?.deliveredRevenue ?? 0).toLocaleString('en-IN')} Delivered
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-400 border border-rose-100 dark:border-rose-900/40">
+                                  ₹{(dashboardSummary?.metrics?.confirmedBalanceDue ?? 0).toLocaleString('en-IN')} Due
+                                </span>
+                              </div>
+                            </>
                           )}
-                          <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 font-medium">
-                            ₹{(dashboardSummary?.metrics?.confirmedRevenue ?? 0).toLocaleString('en-IN')} Confirmed · ₹{(dashboardSummary?.metrics?.deliveredRevenue ?? 0).toLocaleString('en-IN')} Delivered · ₹{(dashboardSummary?.metrics?.confirmedBalanceDue ?? 0).toLocaleString('en-IN')} Due
-                          </p>
                         </div>
                       </div>
 
-                      {/* Card 3: Pending Order Value */}
+                      {/* Card 3: Pending Order Value — amber (matches the Pending
+                          order-status color elsewhere in the app) */}
                       <div
                         onClick={() => setActiveTab('orders')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Pending Order Value</span>
-                          <Clock size={16} className="text-[var(--accent)]" />
-                        </div>
-                        <div className="mt-4">
+                        <Clock size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-amber-500/20 dark:text-amber-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Pending Order Value</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
@@ -3405,16 +3853,16 @@ export default function Webapp() {
                         </div>
                       </div>
 
-                      {/* Card 4: Invested This Month */}
+                      {/* Card 4: Invested This Month — violet (money going out;
+                          distinct from the other three, no longer reused by any
+                          order-status color now that the old "Ready" status is gone) */}
                       <div
                         onClick={() => setActiveTab('expenses')}
-                        className="bg-[var(--surface)] p-6 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
+                        className="relative overflow-hidden bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm cursor-pointer hover:border-[var(--accent)] transition-all hover:shadow-md flex flex-col justify-between min-h-[140px]"
                       >
-                        <div className="flex items-center justify-between text-[var(--text-secondary)] text-xs font-semibold">
-                          <span>Invested This Month</span>
-                          <PiggyBank size={16} className="text-[var(--accent)]" />
-                        </div>
-                        <div className="mt-4">
+                        <PiggyBank size={130} strokeWidth={2} className="absolute -right-6 -top-6 text-violet-500/20 dark:text-violet-400/20 pointer-events-none" />
+                        <span className="relative text-[var(--text-secondary)] text-xs font-semibold">Invested This Month</span>
+                        <div className="relative">
                           {dashboardLoading ? (
                             <div className="h-8 w-24 bg-[var(--text-primary)]/8 rounded-lg animate-pulse" />
                           ) : (
@@ -3690,9 +4138,7 @@ export default function Webapp() {
                               <div className="flex justify-between items-center pt-4 mt-4 border-t border-[var(--border)]/50 gap-2 flex-wrap">
                                 <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10.5px] font-bold ${o.status === 'Pending' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border border-[var(--border)]' :
                                   o.status === 'Confirmed' ? 'bg-blue-50 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 border border-blue-200/50' :
-                                    o.status === 'In Progress' ? 'bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200/50' :
-                                      o.status === 'Ready' ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/50' :
-                                        o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
+                                    o.status === 'Delivered' ? 'bg-neutral-50 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400' :
                                           'bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400'
                                   }`}>
                                   <span className="w-1.5 h-1.5 bg-current rounded-full"></span>
@@ -3934,8 +4380,16 @@ export default function Webapp() {
                         chips from calendarOrdersByDate (the whole-month
                         GET /api/orders fetch, grouped by date), not from
                         GET /api/dashboard/calendar (which only carries
-                        per-day aggregate counts). */}
-                    <div className="bg-[var(--surface)] rounded-[28px] border border-[var(--border)] p-5 shadow-sm w-full flex flex-col items-center">
+                        per-day aggregate counts).
+
+                        Bleeds full-bleed edge-to-edge of the phone-width
+                        shell via -mx-4 (cancelling out <main>'s px-4) and
+                        rounded-none, rather than the rounded/inset card
+                        treatment every other section uses — the day grid
+                        needs the extra ~32px of width far more than it
+                        needs a matching card border, and this only affects
+                        Calendar, not the rest of the app's layout. */}
+                    <div className="-mx-4 w-[calc(100%+2rem)] bg-[var(--surface)] border-y border-[var(--border)] p-3 shadow-sm flex flex-col items-center">
 
                       {/* Month title + stats + "back to today" */}
                       <div className="w-full flex flex-col items-center mb-4 text-center">
@@ -3968,8 +4422,20 @@ export default function Webapp() {
                           scrollable; tapping a pill re-centers the window
                           on that month, so tapping the edge pill repeatedly
                           walks further back/forward without needing
-                          separate prev/next arrows. */}
-                      <div className="w-full flex gap-2 overflow-x-auto no-scrollbar pb-4 mb-4 border-b border-[var(--border)]/60 -mx-1 px-1">
+                          separate prev/next arrows.
+
+                          The native scrollbar stays hidden (no-scrollbar)
+                          but the plain static divider that used to sit
+                          below the strip is replaced by a custom
+                          track+thumb indicator underneath — see
+                          monthStripScrollThumb below — so there's still a
+                          visible, animated signal of scroll position/how
+                          much more content there is. */}
+                      <div
+                        ref={monthStripRef}
+                        onScroll={updateMonthStripScrollThumb}
+                        className="w-full flex gap-2 overflow-x-auto no-scrollbar pb-2 -mx-1 px-1"
+                      >
                         {(calendarMonthsOverviewLoading && calendarMonthsOverview.length === 0
                           ? Array.from({ length: 6 })
                           : calendarMonthsOverview
@@ -3998,6 +4464,19 @@ export default function Webapp() {
                         })}
                       </div>
 
+                      {/* Animated scroll-position "underline" standing in
+                          for the strip's old static border-b divider —
+                          thumb width/position are recomputed on every
+                          scroll event (see updateMonthStripScrollThumb),
+                          and the transition classes animate it smoothly
+                          rather than snapping. */}
+                      <div className="relative w-full h-[3px] rounded-full bg-[var(--border)]/50 mb-4 overflow-hidden">
+                        <div
+                          className="absolute inset-y-0 rounded-full bg-[var(--accent)] transition-[left,width] duration-150 ease-out"
+                          style={{ width: `${monthStripScrollThumb.widthPct}%`, left: `${monthStripScrollThumb.leftPct}%` }}
+                        />
+                      </div>
+
                       {/* Weekdays Headers */}
                       <div className="grid grid-cols-7 text-center text-[10px] font-bold text-[var(--text-secondary)] mb-4 gap-y-1 uppercase tracking-widest w-full font-serif">
                         <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
@@ -4017,7 +4496,12 @@ export default function Webapp() {
                           const isSelected = selectedCalendarDate === dateStr;
                           const isToday = dateStr === todayCalendarDateStr;
                           const dayOrders = calendarOrdersByDate[dateStr] ?? [];
-                          const visibleOrders = dayOrders.slice(0, 2);
+                          // Only the first order's name is shown directly on the
+                          // cell now (cake category dropped entirely) — full
+                          // details for every order on the date are one tap away
+                          // in the drill-down list below, so the cell itself only
+                          // needs to signal "something's here" and how much.
+                          const visibleOrders = dayOrders.slice(0, 1);
                           const overflowCount = dayOrders.length - visibleOrders.length;
 
                           return (
@@ -4052,7 +4536,6 @@ export default function Webapp() {
                                   title={`${o.customerName || 'Walk-in customer'} — ${o.cakeCategory}`}
                                 >
                                   <div className="text-[8px] font-bold truncate">{o.customerName || 'Walk-in'}</div>
-                                  <div className="text-[7px] font-medium opacity-80 truncate">{o.cakeCategory}</div>
                                 </div>
                               ))}
                               {overflowCount > 0 && (
@@ -4544,8 +5027,30 @@ export default function Webapp() {
                     {/* Log form (Left Column) — real fields: quantity x
                         pricePerUnit (server computes totalCost), not a flat
                         "amount"; real category vocab; purchaseDate required. */}
-                    <form onSubmit={handleLogExpense} className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm">
-                      <h4 className="font-serif font-bold text-base mb-4">Log New Expense</h4>
+                    <div className="bg-[var(--surface)] p-5 rounded-[24px] border border-[var(--border)] shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="font-serif font-bold text-base">Log New Expense</h4>
+                        {/* Detailed = the original form below, completely
+                            unchanged. Quick Total = category + amount + note
+                            + optional receipt photo, posting to the same
+                            POST /api/investments. */}
+                        <div className="flex bg-[var(--background)] border border-[var(--border)] rounded-full p-0.5 text-[10px] font-bold">
+                          <button
+                            type="button"
+                            onClick={() => setExpenseLogMode('detailed')}
+                            className={`px-3 py-1.5 rounded-full transition-colors cursor-pointer ${expenseLogMode === 'detailed' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'}`}
+                          >
+                            Detailed
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setExpenseLogMode('quick')}
+                            className={`px-3 py-1.5 rounded-full transition-colors cursor-pointer ${expenseLogMode === 'quick' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'}`}
+                          >
+                            Quick Total
+                          </button>
+                        </div>
+                      </div>
 
                       {logExpenseError && (
                         <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium mb-3 flex items-center gap-2">
@@ -4553,6 +5058,8 @@ export default function Webapp() {
                         </div>
                       )}
 
+                      {expenseLogMode === 'detailed' ? (
+                      <form onSubmit={handleLogExpense}>
                       <div className="flex flex-col gap-3.5">
                         <div>
                           <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Material / item</label>
@@ -4655,16 +5162,124 @@ export default function Webapp() {
                           <Plus size={16} strokeWidth={2.5} /> {logExpenseSubmitting ? 'Logging...' : 'Log Purchase'}
                         </button>
                       </div>
-                    </form>
+                      </form>
+                      ) : (
+                      <form onSubmit={handleLogQuickExpense}>
+                      {quickExpensePhotoUploadError && (
+                        <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-3 rounded-xl text-[11px] font-medium mb-3 flex items-center gap-2">
+                          <AlertCircle size={13} /> {quickExpensePhotoUploadError}
+                        </div>
+                      )}
+                      <div className="flex flex-col gap-3.5">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Amount (₹)</label>
+                            <div className="flex items-center border border-[var(--border)] rounded-xl bg-[var(--background)] px-3 focus-within:border-[var(--accent)] transition-colors">
+                              <span className="text-[var(--text-secondary)] text-xs font-semibold">₹</span>
+                              <input
+                                type="number"
+                                placeholder="0.00"
+                                min="0.01"
+                                step="0.01"
+                                value={quickExpenseForm.amount}
+                                onChange={(e) => setQuickExpenseForm({ ...quickExpenseForm, amount: e.target.value })}
+                                className="w-full py-2.5 px-2 text-xs outline-none bg-transparent font-bold"
+                                required
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Category</label>
+                            <select
+                              value={quickExpenseForm.category}
+                              onChange={(e) => setQuickExpenseForm({ ...quickExpenseForm, category: e.target.value as RealInvestmentCategory })}
+                              className="w-full bg-[var(--background)] border border-[var(--border)] text-xs rounded-xl py-3 px-3 outline-none"
+                            >
+                              {expenseCategories.map((category) => (
+                                <option key={category} value={category}>{category}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
 
-                    {/* Recent purchases log (Right Column) — real GET /api/investments */}
+                        <div>
+                          <label className="text-[10px] font-bold text-[var(--text-secondary)] mb-1 block">Note (optional)</label>
+                          <input
+                            type="text"
+                            placeholder="e.g. Flour from local market"
+                            value={quickExpenseForm.note}
+                            onChange={(e) => setQuickExpenseForm({ ...quickExpenseForm, note: e.target.value })}
+                            className="w-full bg-[var(--background)] border border-[var(--border)] rounded-xl py-2.5 px-3 text-xs outline-none"
+                          />
+                        </div>
+
+                        {/* Attach Bill — same signed-upload + direct-PUT
+                            flow as the menu item / profile photo uploads
+                            (category=INVESTMENT_RECEIPT). Uploads on select,
+                            not on submit, so the baker sees the thumbnail
+                            and any upload error before logging the expense. */}
+                        <div className="flex items-center gap-3">
+                          <div className="w-14 h-14 rounded-xl overflow-hidden bg-[var(--background)] border border-[var(--border)] flex items-center justify-center text-[var(--text-secondary)] shrink-0">
+                            {quickExpenseForm.receiptPhotoPreviewUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={quickExpenseForm.receiptPhotoPreviewUrl} alt="Bill" className="w-full h-full object-cover" />
+                            ) : (
+                              <Camera size={18} />
+                            )}
+                          </div>
+                          <label className="text-xs font-bold text-[var(--accent)] cursor-pointer hover:underline">
+                            {quickExpensePhotoUploading ? 'Uploading...' : quickExpenseForm.receiptPhotoPreviewUrl ? 'Replace Bill Photo' : 'Attach Bill'}
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp"
+                              capture="environment"
+                              className="hidden"
+                              disabled={quickExpensePhotoUploading}
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) handleQuickExpensePhotoUpload(file);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={logExpenseSubmitting || quickExpensePhotoUploading}
+                          className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-60 text-white text-xs font-bold py-3.5 rounded-xl transition-all shadow-sm flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
+                        >
+                          <Plus size={16} strokeWidth={2.5} /> {logExpenseSubmitting ? 'Logging...' : 'Log Purchase'}
+                        </button>
+                      </div>
+                      </form>
+                      )}
+                    </div>
+
+                    {/* Recent purchases log (Right Column) — real GET
+                        /api/investments, capped to the 5 most recent (see
+                        RECENT_INVESTMENTS_LIMIT) like a bank statement's
+                        account summary. "View All" drills into the
+                        separately-paginated expense-history sheet rather
+                        than paginating in place here. */}
                     <div className="lg:col-span-2 flex flex-col gap-3.5">
-                      <h3 className="font-serif text-lg font-bold">Recent Purchases</h3>
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-serif text-lg font-bold">Recent Purchases</h3>
+                        {!!investmentsPagination && investmentsPagination.totalItems > RECENT_INVESTMENTS_LIMIT && (
+                          <button
+                            type="button"
+                            onClick={openExpenseHistory}
+                            className="text-xs font-bold text-[var(--accent)] hover:underline cursor-pointer flex items-center gap-0.5"
+                          >
+                            View All <ChevronRight size={14} />
+                          </button>
+                        )}
+                      </div>
 
                       {investmentsError && (
                         <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
                           <span className="flex items-center gap-2"><AlertCircle size={14} /> {investmentsError}</span>
-                          <button onClick={() => setInvestmentsPage((p) => p)} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                          <button onClick={fetchInvestments} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
                         </div>
                       )}
 
@@ -4684,43 +5299,46 @@ export default function Webapp() {
                           investmentsList.map((entry) => (
                             <div
                               key={entry.id}
-                              className="bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center"
+                              onClick={entry.receiptPhotoUrl ? () => setReceiptLightboxUrl(entry.receiptPhotoUrl) : undefined}
+                              className={`bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center ${entry.receiptPhotoUrl ? 'cursor-pointer' : ''}`}
                             >
                               <div>
                                 <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{entry.purchaseDate}</span>
                                 <h4 className="font-bold text-sm text-[var(--text-primary)] mt-1">{entry.materialName}</h4>
                                 <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{entry.quantity} {entry.unit} × ₹{entry.pricePerUnit}</p>
-                                <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full mt-2 uppercase tracking-wide">
-                                  {entry.category}
-                                </span>
+                                <div className="flex items-center gap-1.5 mt-2">
+                                  <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full uppercase tracking-wide">
+                                    {entry.category}
+                                  </span>
+                                  {entry.receiptPhotoUrl && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setReceiptLightboxUrl(entry.receiptPhotoUrl); }}
+                                      className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-50 dark:bg-[#1A0C06] text-orange-600 border border-orange-100 cursor-pointer"
+                                      aria-label="View receipt photo"
+                                    >
+                                      <Receipt size={11} />
+                                    </button>
+                                  )}
+                                </div>
                               </div>
 
-                              <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); handleDeleteInvestment(entry); }}
+                                  disabled={investmentDeletingId === entry.id}
+                                  className="p-1.5 text-[var(--text-secondary)] hover:text-red-600 disabled:opacity-40 rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                  aria-label="Delete expense"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
                             </div>
                           ))}
                       </div>
 
-                      {investmentsPagination && investmentsPagination.totalPages > 1 && (
-                        <div className="flex items-center justify-between mt-2">
-                          <button
-                            disabled={!investmentsPagination.hasPrevious}
-                            onClick={() => setInvestmentsPage((p) => Math.max(1, p - 1))}
-                            className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                          >
-                            Previous
-                          </button>
-                          <span className="text-xs text-[var(--text-secondary)]">
-                            Page {investmentsPagination.page} of {investmentsPagination.totalPages}
-                          </span>
-                          <button
-                            disabled={!investmentsPagination.hasNext}
-                            onClick={() => setInvestmentsPage((p) => p + 1)}
-                            className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                          >
-                            Next
-                          </button>
-                        </div>
-                      )}
                     </div>
 
                   </div>
@@ -5822,7 +6440,11 @@ export default function Webapp() {
                                 )}
                                 {receiptShareSent && (
                                   <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200/50 text-blue-700 dark:text-blue-400 px-3 py-2 rounded-xl text-[11px] font-medium flex items-center gap-2">
-                                    <Download size={12} /> Image downloaded — attach it in the WhatsApp chat that just opened.
+                                    {receiptShareUsedFallback ? (
+                                      <><Download size={12} /> Image downloaded — attach it in the WhatsApp chat that just opened.</>
+                                    ) : (
+                                      <><Share2 size={12} /> Receipt sent to the share sheet — pick WhatsApp to send it.</>
+                                    )}
                                   </div>
                                 )}
                                 {receiptShareError && (
@@ -7950,6 +8572,107 @@ export default function Webapp() {
                       </div>
                     )}
 
+                    {/* SHEET: EXPENSE HISTORY — full, independently-paginated
+                        expense ledger, opened via "View All" on the
+                        Expenses tab's Recent Purchases (which itself only
+                        ever shows the 5 most recent, bank-statement-style).
+                        Reuses the exact same entry-card markup/behavior
+                        (receipt lightbox, delete) as Recent Purchases,
+                        just reading from historyList/historyPagination
+                        instead. */}
+                    {activeSheet === 'expense-history' && (
+                      <div className="flex-1 flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                          <button type="button" onClick={() => setActiveSheet('none')} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900"><X size={20} /></button>
+                          <h3 className="font-serif text-xl md:text-2xl font-bold">Expense History</h3>
+                          <span className="w-8" />
+                        </div>
+
+                        <div className="flex-1 flex flex-col gap-4 overflow-y-auto">
+                          {historyError && (
+                            <div className="bg-red-50 dark:bg-red-950/20 border border-red-200/50 text-red-700 dark:text-red-400 p-4 rounded-2xl text-xs font-medium flex items-center justify-between gap-3">
+                              <span className="flex items-center gap-2"><AlertCircle size={14} /> {historyError}</span>
+                              <button onClick={fetchExpenseHistory} className="font-bold underline shrink-0 cursor-pointer">Retry</button>
+                            </div>
+                          )}
+
+                          {historyLoading &&
+                            [0, 1, 2, 3].map((i) => (
+                              <div key={i} className="h-24 bg-[var(--text-primary)]/8 rounded-[22px] animate-pulse" />
+                            ))}
+
+                          {!historyLoading && !historyError && historyList.length === 0 && (
+                            <p className="text-xs text-[var(--text-secondary)] text-center py-8">No expenses logged yet.</p>
+                          )}
+
+                          {!historyLoading &&
+                            historyList.map((entry) => (
+                              <div
+                                key={entry.id}
+                                onClick={entry.receiptPhotoUrl ? () => setReceiptLightboxUrl(entry.receiptPhotoUrl) : undefined}
+                                className={`bg-[var(--surface)] p-4.5 rounded-[22px] border border-[var(--border)] shadow-sm flex justify-between items-center ${entry.receiptPhotoUrl ? 'cursor-pointer' : ''}`}
+                              >
+                                <div>
+                                  <span className="text-[10px] text-[var(--text-secondary)] font-semibold">{entry.purchaseDate}</span>
+                                  <h4 className="font-bold text-sm text-[var(--text-primary)] mt-1">{entry.materialName}</h4>
+                                  <p className="text-[10px] text-[var(--text-secondary)] mt-0.5">{entry.quantity} {entry.unit} × ₹{entry.pricePerUnit}</p>
+                                  <div className="flex items-center gap-1.5 mt-2">
+                                    <span className="inline-flex text-[9px] font-extrabold text-[var(--text-secondary)] bg-neutral-100 dark:bg-neutral-900 border border-[var(--border)] px-2.5 py-0.5 rounded-full uppercase tracking-wide">
+                                      {entry.category}
+                                    </span>
+                                    {entry.receiptPhotoUrl && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setReceiptLightboxUrl(entry.receiptPhotoUrl); }}
+                                        className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-50 dark:bg-[#1A0C06] text-orange-600 border border-orange-100 cursor-pointer"
+                                        aria-label="View receipt photo"
+                                      >
+                                        <Receipt size={11} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className="font-extrabold text-base text-red-600">- ₹{entry.totalCost.toLocaleString('en-IN')}</span>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteInvestment(entry); }}
+                                    disabled={investmentDeletingId === entry.id}
+                                    className="p-1.5 text-[var(--text-secondary)] hover:text-red-600 disabled:opacity-40 rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+                                    aria-label="Delete expense"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+
+                        {historyPagination && historyPagination.totalPages > 1 && (
+                          <div className="flex items-center justify-between mt-4 pt-4 border-t border-[var(--border)]">
+                            <button
+                              disabled={!historyPagination.hasPrevious}
+                              onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+                              className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              Previous
+                            </button>
+                            <span className="text-xs text-[var(--text-secondary)]">
+                              Page {historyPagination.page} of {historyPagination.totalPages}
+                            </span>
+                            <button
+                              disabled={!historyPagination.hasNext}
+                              onClick={() => setHistoryPage((p) => p + 1)}
+                              className="text-xs font-bold px-4 py-2 rounded-xl border border-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              Next
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                   </motion.div>
                 </div>
               )}
@@ -8145,6 +8868,36 @@ export default function Webapp() {
                         )}
                       </>
                     )}
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            {/* Receipt photo lightbox — opened by tapping a Recent Purchases
+                row/receipt icon that has a receiptPhotoUrl (Quick Total
+                expenses). Independent overlay, own state, not an
+                activeSheet value. */}
+            <AnimatePresence>
+              {receiptLightboxUrl && (
+                <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/90">
+                  <div className="absolute inset-0" onClick={() => setReceiptLightboxUrl(null)} />
+                  <button
+                    type="button"
+                    onClick={() => setReceiptLightboxUrl(null)}
+                    className="absolute top-4 right-4 z-10 p-2 rounded-full bg-white/10 text-white hover:bg-white/20 cursor-pointer"
+                    aria-label="Close"
+                  >
+                    <X size={22} />
+                  </button>
+                  <motion.div
+                    initial={{ scale: 0.95, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.95, opacity: 0 }}
+                    transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+                    className="relative z-0 max-w-full max-h-full"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={receiptLightboxUrl} alt="Receipt" className="max-w-full max-h-[85vh] object-contain rounded-lg" />
                   </motion.div>
                 </div>
               )}
