@@ -14,11 +14,10 @@
 
 import { api } from './api';
 
-// `??` (not `||`) — see the matching comment in lib/api.ts: an
-// intentionally-empty string (same-origin relative requests, used by the
-// dev tunnel proxy in next.config.ts) must not fall through to the
-// production default the way a falsy-string check would.
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'https://kamai-backend-6n6v.onrender.com';
+// Empty by default so these calls go same-origin through the /api/* rewrite
+// in next.config.ts — see the full explanation in lib/api.ts. Keeping the
+// browser on this app's origin is what keeps the auth cookies first-party.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 export interface SendEmailOtpResponse {
   success: boolean;

@@ -6,10 +6,22 @@
  * kamai_access_token across the frontend/backend origin difference.
  */
 
-// `??` (not `||`) so an intentionally-empty string — same-origin relative
-// requests, used for the dev tunnel proxy in next.config.ts — doesn't fall
-// through to the production default the way a falsy-string check would.
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'https://kamai-backend-6n6v.onrender.com';
+// Empty by default: the browser issues same-origin relative requests, which
+// the /api/* rewrite in next.config.ts proxies to the backend server-side.
+// That's what keeps kamai_access_token / kamai_refresh_token first-party.
+// Pointing the browser straight at the backend's own origin makes them
+// cross-site, which forces the backend into SameSite=None and leaves them in
+// the cookie class browsers evict hardest — they were being dropped
+// overnight, well inside their 7-day maxAge, logging bakers out roughly
+// daily despite a perfectly valid server-side session.
+//
+// Set NEXT_PUBLIC_API_URL to an absolute URL to bypass the proxy and call a
+// backend directly — that's the local-dev default in .env.local. `??` (not
+// `||`) so an explicitly-empty value is still honoured rather than falling
+// back. Note the deliberate contrast with app/m/[bakerSlug]/page.tsx, which
+// keeps an absolute fallback: it fetches server-side, where a relative URL
+// has no origin to resolve against.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 export class ApiError extends Error {
   status: number;
